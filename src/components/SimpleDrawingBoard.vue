@@ -5,8 +5,23 @@ import SignatureModal from './SignatureModal.vue';
 import BrushSelector from './BrushSelector.vue';
 import { createBrush, BrushType } from '@/utils/brushes';
 import { BaseBrush } from '@/utils/brushes';
+import { useCommunication, communicationService } from '@/services/channelService'; // 修改导入
 
 const router = useRouter();
+
+// 添加通信相关
+const { send, unsubscribe } = useCommunication();
+const displayWindow = ref<Window | null>(null);
+let heartbeatInterval: number | null = null;
+
+// 添加连接状态管理
+const connectionStatus = reactive({
+  connected: false,
+  lastHeartbeat: 0,
+  retryCount: 0,
+  maxRetries: 5,
+  pollingInterval: 3000, // 3秒轮询一次
+});
 
 // 状态管理
 const isDrawing = ref(false);
@@ -32,6 +47,104 @@ const currentHistoryIndex = ref(-1);
 // 当前使用的画笔
 const currentBrush = ref<BaseBrush | null>(null);
 
+// 添加打开DisplayBoard的函数
+function openDisplayBoard() {
+  // 如果已经有打开的窗口且未关闭，则不需要再次打开
+  if (displayWindow.value && !displayWindow.value.closed) {
+    displayWindow.value.focus();
+    return;
+  }
+  
+  // 打开新窗口
+  const url = `/display`; // 确保路由中已配置此路径
+  displayWindow.value = window.open(url, 'simple_display_board');
+  
+  // 检查窗口是否成功打开
+  if (!displayWindow.value) {
+    console.error('无法打开显示窗口，可能被浏览器拦截');
+    return;
+  }
+  
+  // 等待窗口加载完成后发送握手消息
+  setTimeout(() => {
+    send({
+      type: 'status',
+      taskId: 'drawing-board',
+      status: 'handshake'
+    });
+  }, 1000);
+}
+
+// 启动心跳机制
+function startHeartbeat() {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+  }
+  
+  heartbeatInterval = window.setInterval(() => {
+    if (displayWindow.value && !displayWindow.value.closed) {
+      send({
+        type: 'status',
+        taskId: 'drawing-board',
+        status: 'heartbeat'
+      });
+    } else {
+      // 如果窗口已关闭，停止心跳
+      stopHeartbeat();
+    }
+  }, 5000); // 每5秒发送一次心跳
+}
+
+// 停止心跳机制
+function stopHeartbeat() {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+  }
+}
+
+// 更新连接状态
+function updateConnectionStatus(connected: boolean) {
+  connectionStatus.connected = connected;
+  connectionStatus.lastHeartbeat = Date.now();
+  if (connected) {
+    connectionStatus.retryCount = 0;
+  }
+}
+
+// 在handleConfirm函数中添加发送图像数据的功能
+function handleConfirm() {
+  // 获取画布数据
+  const imageData = getImageData();
+  if (!imageData) {
+    console.error('无法获取画布数据');
+    return;
+  }
+  
+  // 如果DisplayBoard窗口未打开，则打开它
+  if (!displayWindow.value || displayWindow.value.closed) {
+    openDisplayBoard();
+    // 设置定时发送心跳消息
+    startHeartbeat();
+  } else {
+    sendImageToDisplayBoard(imageData);
+  }
+  
+  // 显示签名框
+  showSignatureModal.value = true;
+}
+
+// 添加发送图像数据到DisplayBoard的函数
+function sendImageToDisplayBoard(imageData: string) {
+  send({
+    type: 'task',
+    taskId: 'drawing-to-display',
+    imageData,
+    positivePrompt: '',
+    negativePrompt: ''
+  });
+}
+
 // 绘图设置
 const drawingSettings = reactive({
   lineWidth: 5,
@@ -53,7 +166,7 @@ onMounted(() => {
   
   ctx.value = canvas.getContext('2d');
   if (!ctx.value) return;
-  
+
   // 设置画布背景为白色
   ctx.value.fillStyle = '#ffffff';
   ctx.value.fillRect(0, 0, drawingSettings.canvasWidth, drawingSettings.canvasHeight);
@@ -75,12 +188,39 @@ onMounted(() => {
   
   // 保存初始状态到历史记录
   saveToHistory();
+  
+  // 添加消息接收处理
+  const unsubscribeFunc = communicationService.receive((message) => {
+    console.log('收到消息:', message);
+    
+    // 处理握手响应
+    if (message.type === 'status' && message.status === 'connected') {
+      updateConnectionStatus(true);
+      console.log('连接已建立');
+    }
+    // 处理心跳响应
+    else if (message.type === 'status' && message.status === 'heartbeat') {
+      updateConnectionStatus(true);
+    }
+  });
+  
+  // 自动打开DisplayBoard
+  openDisplayBoard();
+  // 启动心跳机制
+  startHeartbeat();
 });
 
 // 组件卸载时移除事件监听器
 onBeforeUnmount(() => {
+  stopHeartbeat();
+  unsubscribe();
   window.removeEventListener('paste', handlePaste);
   window.removeEventListener('keydown', handleKeyDown);
+  
+  // 关闭DisplayBoard窗口
+  if (displayWindow.value && !displayWindow.value.closed) {
+    displayWindow.value.close();
+  }
 });
 
 // 开始绘制
@@ -273,8 +413,8 @@ function handlePaste(e: ClipboardEvent) {
   e.preventDefault();
 }
 
-// 确认按钮处理函数
-function handleConfirm() {
+// 删除这个重复的handleConfirm函数
+function handleSignatureConfirmOpen() {
   showSignatureModal.value = true;
 }
 
@@ -446,6 +586,9 @@ function hideBrushTipHandler() {
       
       <!-- 右侧按钮区域 -->
       <div class="flex flex-col justify-end items-center gap-5 h-full mx-4 w-[17.2vw]">
+        <div class="connection-status" :class="{'connected': connectionStatus.connected}">
+          {{ connectionStatus.connected ? '已连接' : '未连接' }}
+        </div>
         <div ref="brushButtonRef" class="tool-button-wrapper relative" 
              @click="handleBrushClick" 
              @mouseenter="showBrushTipHandler"
@@ -486,7 +629,7 @@ function hideBrushTipHandler() {
           <img src="@/assets/images/icon/撤回.svg" alt="撤回" class="button-image pointer-events-auto" />
         </div>
         
-        <div class="tool-button-wrapper" @click="handleConfirm">
+        <div class="tool-button-wrapper" @click="handleSignatureConfirmOpen">
           <img src="@/assets/images/icon/确定.svg" alt="确定" class="button-image pointer-events-auto" />
         </div>
       </div>
@@ -618,7 +761,22 @@ img {
   border-right: 6px solid transparent;
   border-top: 6px solid rgba(0, 0, 0, 0.7);
 }
+/* 连接状态指示器样式 */
+.connection-status {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  padding: 6px 12px;
+  border-radius: 12px;
+  font-size: 14px;
+  background-color: rgba(255, 0, 0, 0.7);
+  color: white;
+  transition: background-color 0.3s ease;
+}
 
+.connection-status.connected {
+  background-color: rgba(0, 128, 0, 0.7);
+}
 @keyframes fadeIn {
   from {
     opacity: 0;

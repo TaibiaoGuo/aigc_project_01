@@ -26,16 +26,17 @@ const router = createRouter({
         // component: () => import('@/pages/Index.vue'),
         component: () => import('@/components/SimpleDrawingBoard.vue'),
     },
-    // {
-    //     path: '/simple',
-    //     name: 'App',
-    //     meta: {
-    //         title: 'AI 图像生成',
-    //         keepAlive: true,
-    //         requireAuth: false,
-    //     },
-    //     component: () => import('@/components/SimpleDrawingBoard.vue'),
-    // },
+    {
+        path: '/display',
+        name: 'Display',
+        meta: {
+            title: 'AI 图像生成',
+            keepAlive: true,
+            requireAuth: false,
+        },
+        component: () => import('@/components/SimpleDisplayBoard.vue'),
+    },
+    
     {
         path: '/admin',
         name: 'Admin',
@@ -87,14 +88,14 @@ const router = createRouter({
             requireAuth: false,
         },
         component: () => import('@/components/AIGCGenerationBoard.vue'),
-    }
+    },
   ]
 });
 
 export default router;
 router.beforeEach(async (to) => {
     const token = getToken();
-    if (!token && to.name !== 'Index' && to.name !== 'Result' && to.name !== 'App' && to.name !== 'Admin' && to.name !== 'Drawing' && to.name !== 'AIGCResult') {
+    if (!token && to.name !== 'Index' && to.name !== 'Result' && to.name !== 'App' && to.name !== 'Admin' && to.name !== 'Drawing' && to.name !== 'AIGCResult' && to.name !== 'Display') {
         return { name: 'Index' };
     }
 });

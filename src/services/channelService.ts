@@ -143,6 +143,7 @@ export function useCommunication() {
   return {
     lastMessage,
     send: communicationService.send.bind(communicationService),
+    receive: communicationService.receive.bind(communicationService), // 添加receive函数
     unsubscribe
   };
 }

@@ -19,11 +19,17 @@ const displaySettings = reactive({
   canvasHeight: 360, // 16:9 比例
   showControls: true,
   receivedImage: null as string | null,
-  receivedMessage: null as any
+  receivedMessage: null as any,
+  isAIGenerating: false, // AI生成状态标志
+  isDraftDisplayed: false, // 草稿显示状态标志
+  hasNetworkError: false, // 网络错误状态标志
+  requestTimeout: 60000, // 请求超时时间（毫秒）
+  requestTimer: null as number | null // 请求计时器
 });
 
+
 // 通信服务
-const { lastMessage, send, unsubscribe } = useCommunication();
+const { lastMessage, send, receive, unsubscribe } = useCommunication();
 
 // 监听接收到的消息
 const messageReceived = ref(false);
@@ -55,8 +61,8 @@ onMounted(() => {
   // 保存初始状态到历史记录
   saveToHistory();
   
-  // 监听消息
-  const unsubscribeFunc = useCommunication().receive((message) => {
+  // 监听消息 - 移除嵌套的 onMounted
+  const unsubscribeFunc = receive((message) => {
     console.log('收到消息:', message);
     displaySettings.receivedMessage = message;
     messageReceived.value = true;
@@ -66,11 +72,32 @@ onMounted(() => {
       handleHandshake(message);
     } else if (message.type === 'status' && message.status === 'heartbeat') {
       updateConnectionStatus();
-    } else if (message.type === 'task' && message.imageData) {
+    } else if (message.type === 'canvas_update' && message.imageData) {
+      // 直接显示画布数据
       displayImage(message.imageData);
       updateConnectionStatus();
+    } else if (message.type === 'task' && message.imageData) {
+      // 显示草稿图像
+      displaySettings.isDraftDisplayed = true;
+      displaySettings.hasNetworkError = false; // 重置错误状态
+      displayImage(message.imageData);
+      updateConnectionStatus();
+    } else if (message.type === 'status' && message.status === 'generating') {
+      // 标记AI正在生成中
+      displaySettings.isAIGenerating = true;
+      displaySettings.hasNetworkError = false; // 重置错误状态
+      
+      // 设置请求超时计时器
+      startRequestTimeoutTimer();
+    } else if (message.type === 'status' && message.status === 'error') {
+      // 处理错误状态
+      handleRequestError();
     } else if (message.type === 'result' && message.imageUrl) {
-      // 处理结果图片URL
+      // 处理结果图片URL - AI生成完成
+      clearRequestTimeoutTimer(); // 清除超时计时器
+      displaySettings.isAIGenerating = false;
+      displaySettings.hasNetworkError = false; // 重置错误状态
+      
       const img = new Image();
       img.onload = () => {
         if (!canvasRef.value || !ctx.value) return;
@@ -112,12 +139,46 @@ onMounted(() => {
   startConnectionPolling();
 });
 
+function startRequestTimeoutTimer() {
+  // 先清除可能存在的计时器
+  clearRequestTimeoutTimer();
+  
+  // 设置新的计时器
+  displaySettings.requestTimer = window.setTimeout(() => {
+    handleRequestError();
+  }, displaySettings.requestTimeout);
+}
+
+// 清除请求超时计时器
+function clearRequestTimeoutTimer() {
+  if (displaySettings.requestTimer) {
+    clearTimeout(displaySettings.requestTimer);
+    displaySettings.requestTimer = null;
+  }
+}
+
+// 处理请求错误
+function handleRequestError() {
+  displaySettings.isAIGenerating = false;
+  displaySettings.hasNetworkError = true;
+  clearRequestTimeoutTimer();
+  
+  // 发送错误状态通知
+  send({
+    type: 'status',
+    taskId: 'display-board',
+    status: 'error',
+    progress: 0,
+    total: 100
+  });
+}
+
 // 组件卸载时移除事件监听器和定时器
 onBeforeUnmount(() => {
   unsubscribe();
   stopConnectionPolling();
+  clearRequestTimeoutTimer();
 });
-
 // 发送握手消息
 function sendHandshake() {
   send({
@@ -132,9 +193,7 @@ function sendHandshake() {
 
 // 处理握手响应
 function handleHandshake(message: any) {
-  connectionStatus.connected = true;
-  connectionStatus.lastHeartbeat = Date.now();
-  connectionStatus.retryCount = 0;
+  updateConnectionStatus();
   
   // 发送确认消息
   send({
@@ -255,34 +314,14 @@ function displayImage(imageData: string) {
   const img = new Image();
   img.onload = () => {
     // 清空画布
-    clearCanvas();
+    ctx.value!.clearRect(0, 0, canvasRef.value!.width, canvasRef.value!.height);
     
-    // 计算图片缩放比例，保持宽高比
-    const canvas = canvasRef.value!;
-    const context = ctx.value!;
-    
-    const scale = Math.min(
-      canvas.width / img.width,
-      canvas.height / img.height
-    );
-    
-    const x = (canvas.width - img.width * scale) / 2;
-    const y = (canvas.height - img.height * scale) / 2;
-    
-    // 绘制图片
-    context.drawImage(
-      img,
-      0, 0, img.width, img.height,
-      x, y, img.width * scale, img.height * scale
-    );
-    
-    // 保存到历史记录
-    saveToHistory();
+    // 直接绘制图片，保持原始尺寸
+    ctx.value!.drawImage(img, 0, 0, canvasRef.value!.width, canvasRef.value!.height);
   };
   
-  // 添加 base64 前缀
-  img.src = `data:image/png;base64,${imageData}`;
-  displaySettings.receivedImage = img.src;
+  // 直接使用完整的 data URL
+  img.src = imageData.startsWith('data:') ? imageData : `data:image/png;base64,${imageData}`;
 }
 
 // 发送消息到其他标签页
@@ -293,51 +332,42 @@ function sendMessage() {
     status: 'ready'
   });
 }
-
-// 返回上一页
-const goBack = () => {
-  router.go(-1);
-};
 </script>
 
 <template>
   <div class="fixed w-full h-full overflow-hidden m-0 p-0 bg-cover bg-center bg-blend-normal display-container">
-    <!-- 顶部导航栏 - 包含返回按钮和Logo -->
-    <div class="absolute top-[3%] left-0 right-0 w-full flex flex-row justify-between items-center px-[3%] box-border z-10">
-      <div class="flex flex-row items-center">
-        <div class="flex flex-row justify-center items-center gap-4 cursor-pointer" @click="goBack">
-          <div class="back-button-bg relative">
-            <div class="back-arrow"></div>
-          </div>
-          <div class="title-text">显示交互区域</div>
+    <!-- 顶部只保留Logo -->
+    <div class="absolute top-[3%] right-[3%] flex items-center z-10">
+      <img src="@/assets/images/logo.svg" alt="艺启创" class="h-10 pointer-events-none" />
+    </div>
+    
+    <!-- 主要内容区域 - 画布 -->
+    <div class="absolute top-[10%] left-[3%] w-[94%] h-[80%] flex justify-center items-center">
+      <canvas
+        ref="canvasRef"
+        :width="displaySettings.canvasWidth"
+        :height="displaySettings.canvasHeight"
+        class="bg-white rounded-lg border-[5px] border-white shadow-md w-full h-full"
+      ></canvas>
+    </div>
+    
+    <!-- 底部状态区域 -->
+    <div class="absolute bottom-[3%] left-0 right-0 flex flex-row items-center justify-center gap-4">
+      <!-- AIGC实时生成画面文本 -->
+      <div class="aigc-status-text mb-2">
+        <span v-if="displaySettings.hasNetworkError" class="text-red-500">网络错误</span>
+        <span v-else-if="displaySettings.isAIGenerating">AIGC正在生成画面...</span>
+        <span v-else-if="displaySettings.isDraftDisplayed && !displaySettings.isAIGenerating">显示草稿画面</span>
+        <span v-else>AIGC实时生成画面</span>
+      </div>
+      
+      <!-- 连接状态指示器 -->
+      <div class="connection-status-wrapper">
+        <div class="connection-status" :class="{ 'connected': connectionStatus.connected, 'disconnected': !connectionStatus.connected, 'error': displaySettings.hasNetworkError }">
+          <span v-if="displaySettings.hasNetworkError">网络错误</span>
+          <span v-else>{{ connectionStatus.connected ? '已连接' : '未连接' }}</span>
         </div>
       </div>
-      <div class="flex items-center">
-        <img src="@/assets/images/logo.svg" alt="艺启创" class="h-10 pointer-events-none" />
-      </div>
-    </div>
-    
-    <!-- 连接状态指示器 -->
-    <div class="connection-status" :class="{ 'connected': connectionStatus.connected, 'disconnected': !connectionStatus.connected }">
-      {{ connectionStatus.connected ? '已连接' : '未连接' }}
-    </div>
-    
-    <!-- 主要内容区域 - 画布和按钮并排 -->
-    <div class="absolute bottom-[6%] left-[3%] w-[94%] h-[80%] flex flex-row justify-start items-center gap-4">
-      <!-- 画布区域 -->
-      <div class="h-full flex-1 flex justify-start items-center">
-        <canvas
-          ref="canvasRef"
-          :width="displaySettings.canvasWidth"
-          :height="displaySettings.canvasHeight"
-          class="bg-white rounded-lg border-[5px] border-white shadow-md w-full h-full"
-        ></canvas>
-      </div>
-    </div>
-    
-    <!-- 消息接收状态指示器 -->
-    <div v-if="messageReceived" class="message-indicator">
-      已接收消息
     </div>
   </div>
 </template>
@@ -350,101 +380,75 @@ const goBack = () => {
   background-blend-mode: plus-darker, normal;
 }
 
-.back-button-bg {
-  width: 40px;
-  height: 40px;
-  background: rgba(255, 255, 255, 0.2);
-  backdrop-filter: blur(10px);
-  border-radius: 50%;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  transition: all 0.3s ease;
-}
-
-.back-arrow {
-  width: 12px;
-  height: 12px;
-  border-top: 2px solid white;
-  border-left: 2px solid white;
-  transform: rotate(-45deg);
-  margin-left: 5px;
-}
-
-.title-text {
+.aigc-status-text {
   font-family: 'A10', sans-serif;
-  font-style: normal;
-  font-weight: 400;
   font-size: 24px;
-  line-height: 1.2;
   color: white;
-  text-shadow: 0px 2px 4px rgba(0, 0, 0, 0.3);
+  text-shadow: 0px 2px 4px rgba(0, 0, 0, 0.5);
+  padding: 8px 20px;
+  background: rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(5px);
+  border-radius: 30px;
+  letter-spacing: 1px;
 }
 
-.tool-button-wrapper {
-  width: 80px;
-  height: 80px;
-  background: rgba(255, 255, 255, 0.2);
-  backdrop-filter: blur(10px);
-  border-radius: 50%;
+.connection-status-wrapper {
   display: flex;
   justify-content: center;
-  align-items: center;
-  cursor: pointer;
-  transition: all 0.3s ease;
-}
-
-.tool-button-wrapper:hover {
-  transform: scale(1.05);
-  background: rgba(255, 255, 255, 0.3);
-}
-
-.tool-button-wrapper:active {
-  transform: scale(0.95);
-}
-
-.button-image {
-  width: 40px;
-  height: 40px;
-  object-fit: contain;
-}
-
-.active-tool {
-  background: rgba(255, 255, 255, 0.4);
-  box-shadow: 0px 0px 15px rgba(255, 255, 255, 0.5);
-}
-
-.message-indicator {
-  position: absolute;
-  top: 20px;
-  right: 20px;
-  background: rgba(0, 255, 0, 0.2);
-  color: white;
-  padding: 8px 16px;
-  border-radius: 20px;
-  backdrop-filter: blur(5px);
-  animation: fadeIn 0.5s ease-in-out;
 }
 
 .connection-status {
-  position: absolute;
-  top: 20px;
-  left: 20px;
-  padding: 8px 16px;
+  padding: 6px 16px;
   border-radius: 20px;
   backdrop-filter: blur(5px);
   color: white;
-  z-index: 20;
   font-size: 14px;
   transition: all 0.3s ease;
+  display: inline-flex;
+  align-items: center;
+}
+
+.connection-status::before {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 8px;
 }
 
 .connected {
-  background: rgba(0, 255, 0, 0.2);
+  background: rgba(0, 255, 0, 0.5);
+}
+
+.connected::before {
+  background-color: #00ff00;
+  box-shadow: 0 0 8px #00ff00;
 }
 
 .disconnected {
   background: rgba(255, 0, 0, 0.2);
+}
+
+.disconnected::before {
+  background-color: #ff0000;
+  box-shadow: 0 0 8px #ff0000;
+}
+
+.error {
+  background: rgba(255, 0, 0, 0.5);
+}
+
+.error::before {
+  background-color: #ff0000;
+  box-shadow: 0 0 8px #ff0000;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 0.5; }
+  50% { opacity: 1; }
+  100% { opacity: 0.5; }
 }
 
 @keyframes fadeIn {

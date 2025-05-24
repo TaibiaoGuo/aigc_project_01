@@ -135,15 +135,6 @@ function handleConfirm() {
 }
 
 // 添加发送图像数据到DisplayBoard的函数
-function sendImageToDisplayBoard(imageData: string) {
-  send({
-    type: 'task',
-    taskId: 'drawing-to-display',
-    imageData,
-    positivePrompt: '',
-    negativePrompt: ''
-  });
-}
 
 // 绘图设置
 const drawingSettings = reactive({
@@ -257,7 +248,21 @@ function draw(e: MouseEvent) {
   lastY.value = y;
 }
 
-// 结束绘制
+// 简化获取画布数据的函数
+function getImageData(): string | null {
+  if (!canvasRef.value) return null;
+  return canvasRef.value.toDataURL('image/png');
+}
+
+// 简化发送图像数据到DisplayBoard的函数
+function sendImageToDisplayBoard(imageData: string) {
+  send({
+    type: 'canvas_update',
+    imageData
+  });
+}
+
+// 添加自动同步功能 - 在绘制结束时自动发送画布数据
 function stopDrawing() {
   if (isDrawing.value) {
     isDrawing.value = false;
@@ -269,6 +274,12 @@ function stopDrawing() {
     
     // 保存当前状态到历史记录
     saveToHistory();
+    
+    // 自动发送画布数据到DisplayBoard
+    const imageData = getImageData();
+    if (imageData && connectionStatus.connected) {
+      sendImageToDisplayBoard(imageData);
+    }
   }
 }
 
@@ -298,14 +309,7 @@ function clearCanvas() {
   saveToHistory();
 }
 
-// 获取画布数据
-function getImageData(): string | null {
-  if (!canvasRef.value) return null;
-  
-  // 去除 base64 前缀
-  const dataUrl = canvasRef.value.toDataURL('image/png');
-  return dataUrl.replace(/^data:image\/png;base64,/, '');
-}
+
 
 // 保存当前状态到历史记录
 function saveToHistory() {

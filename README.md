@@ -790,5 +790,3 @@ export async function getGeneratedImage(filename: string): Promise<string> {
 3. 添加更多绘图工具和选项
 4. 实现图像历史记录和管理功能
 5. 添加更多 AI 模型和参数选择
-
-        当前模型请求量过大，请求排队约 1 位，请稍候或切换至其他模型问答体验更流畅。

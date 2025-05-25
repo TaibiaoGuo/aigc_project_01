@@ -61,82 +61,86 @@ onMounted(() => {
   // 保存初始状态到历史记录
   saveToHistory();
   
-  // 监听消息 - 移除嵌套的 onMounted
-  const unsubscribeFunc = receive((message) => {
-    console.log('收到消息:', message);
-    displaySettings.receivedMessage = message;
-    messageReceived.value = true;
+// 在监听消息的回调函数中添加对后端WebSocket消息的处理
+const unsubscribeFunc = receive((message) => {
+  console.log('收到消息:', message);
+  displaySettings.receivedMessage = message;
+  messageReceived.value = true;
+  
+  // 更新连接状态
+  if (message.type === 'status' && message.status === 'handshake') {
+    handleHandshake(message);
+  } else if (message.type === 'status' && message.status === 'heartbeat') {
+    updateConnectionStatus();
+  } else if (message.type === 'canvas_update' && message.imageData) {
+    // 直接显示画布数据
+    displayImage(message.imageData);
+    updateConnectionStatus();
+  } else if (message.type === 'task' && message.imageData) {
+    // 显示草稿图像
+    displaySettings.isDraftDisplayed = true;
+    displaySettings.hasNetworkError = false; // 重置错误状态
+    displayImage(message.imageData);
+    updateConnectionStatus();
+  } else if (message.type === 'status' && message.status === 'generating') {
+    // 标记AI正在生成中
+    displaySettings.isAIGenerating = true;
+    displaySettings.hasNetworkError = false; // 重置错误状态
     
-    // 更新连接状态
-    if (message.type === 'status' && message.status === 'handshake') {
-      handleHandshake(message);
-    } else if (message.type === 'status' && message.status === 'heartbeat') {
-      updateConnectionStatus();
-    } else if (message.type === 'canvas_update' && message.imageData) {
-      // 直接显示画布数据
-      displayImage(message.imageData);
-      updateConnectionStatus();
-    } else if (message.type === 'task' && message.imageData) {
-      // 显示草稿图像
-      displaySettings.isDraftDisplayed = true;
-      displaySettings.hasNetworkError = false; // 重置错误状态
-      displayImage(message.imageData);
-      updateConnectionStatus();
-    } else if (message.type === 'status' && message.status === 'generating') {
-      // 标记AI正在生成中
-      displaySettings.isAIGenerating = true;
-      displaySettings.hasNetworkError = false; // 重置错误状态
+    // 设置请求超时计时器
+    startRequestTimeoutTimer();
+  } else if (message.type === 'status' && message.status === 'processing') {
+    // 处理后端处理状态更新
+    displaySettings.isAIGenerating = true;
+    displaySettings.hasNetworkError = false;
+    // 重置超时计时器
+    startRequestTimeoutTimer();
+  } else if (message.type === 'status' && message.status === 'error') {
+    // 处理错误状态
+    handleRequestError();
+  } else if (message.type === 'result' && message.imageUrl) {
+    // 处理结果图片URL - AI生成完成
+    clearRequestTimeoutTimer(); // 清除超时计时器
+    displaySettings.isAIGenerating = false;
+    displaySettings.hasNetworkError = false; // 重置错误状态
+    
+    // 获取图像URL
+    const imageUrl = message.imageUrl.startsWith('http') 
+      ? message.imageUrl 
+      : `${window.location.origin}${message.imageUrl}`;
+    
+    const img = new Image();
+    img.onload = () => {
+      if (!canvasRef.value || !ctx.value) return;
       
-      // 设置请求超时计时器
-      startRequestTimeoutTimer();
-    } else if (message.type === 'status' && message.status === 'error') {
-      // 处理错误状态
-      handleRequestError();
-    } else if (message.type === 'result' && message.imageUrl) {
-      // 处理结果图片URL - AI生成完成
-      clearRequestTimeoutTimer(); // 清除超时计时器
-      displaySettings.isAIGenerating = false;
-      displaySettings.hasNetworkError = false; // 重置错误状态
+      // 清空画布
+      clearCanvas();
       
-      const img = new Image();
-      img.onload = () => {
-        if (!canvasRef.value || !ctx.value) return;
-        
-        // 清空画布
-        clearCanvas();
-        
-        // 计算图片缩放比例，保持宽高比
-        const canvas = canvasRef.value;
-        const context = ctx.value;
-        
-        const scale = Math.min(
-          canvas.width / img.width,
-          canvas.height / img.height
-        );
-        
-        const x = (canvas.width - img.width * scale) / 2;
-        const y = (canvas.height - img.height * scale) / 2;
-        
-        // 绘制图片
-        context.drawImage(
-          img,
-          0, 0, img.width, img.height,
-          x, y, img.width * scale, img.height * scale
-        );
-        
-        // 保存到历史记录
-        saveToHistory();
-      };
-      img.src = message.imageUrl;
-      updateConnectionStatus();
-    }
-  });
-  
-  // 发送初始握手消息
-  sendHandshake();
-  
-  // 启动连接状态轮询
-  startConnectionPolling();
+      // 计算图片缩放比例，保持宽高比
+      const canvas = canvasRef.value;
+      const context = ctx.value;
+      
+      const scale = Math.min(
+        canvas.width / img.width,
+        canvas.height / img.height
+      );
+      
+      const x = (canvas.width - img.width * scale) / 2;
+      const y = (canvas.height - img.height * scale) / 2;
+      
+      // 绘制图片
+      context.drawImage(
+        img,
+        0, 0, img.width, img.height,
+        x, y, img.width * scale, img.height * scale
+      );
+      
+      // 保存到历史记录
+      saveToHistory();
+    };
+    img.src = imageUrl;
+    updateConnectionStatus();
+  }
 });
 
 function startRequestTimeoutTimer() {

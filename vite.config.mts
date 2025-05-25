@@ -159,12 +159,12 @@ export default defineConfig(({ command }) => {
         port: 9000,
         host: '127.0.0.1',
         proxy: {
-            // 添加 ComfyUI 代理
+            // 修改为后端FastAPI服务器
             '/api': {
-                // target: 'http://127.0.0.1:6006',
-                target:'http://127.0.0.1:8188',
+                target: 'http://127.0.0.1:8000',
                 changeOrigin: true,
-                rewrite: (path) => path.replace(/^\/api/, ''),
+                // 不需要重写路径，因为后端API已经包含/api前缀
+                // rewrite: (path) => path.replace(/^/api/, ''),
             }
         }
     },

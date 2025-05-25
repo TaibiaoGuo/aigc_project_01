@@ -301,34 +301,40 @@ function handlePaste(e: ClipboardEvent) {
 async function generateImage() {
   try {
     // 获取画布数据
-    const imageData = getImageData();
-    if (!imageData) {
-      throw new Error('无法获取画布数据');
+    const canvas = canvasRef.value;
+    if (!canvas) {
+      throw new Error('无法获取画布');
     }
     
+    const imageData = canvas.toDataURL('image/png');
+    
+    // 上传草图
+    const sessionInfo = await uploadSketch(imageData, 'realistic');
+    
     // 打开结果窗口
-    openResultWindow();
+    openResultWindow(sessionInfo.session_id);
     
-    // 等待窗口加载
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    // 上传图像
-    const imageName = await uploadImage(imageData);
-    
-    // 提交工作流
-    const taskId = await submitPrompt(
-      imageName, 
-      promptSettings.positivePrompt, 
-      promptSettings.negativePrompt
-    );
-    
-    // 发送任务数据到结果窗口
-    send({
-      type: 'task',
-      taskId,
-      imageData,
-      positivePrompt: promptSettings.positivePrompt,
-      negativePrompt: promptSettings.negativePrompt
+    // 创建WebSocket连接
+    const wsConnection = createWebSocketConnection(sessionInfo.session_id, {
+      onMessage: (data) => {
+        // 发送任务数据到结果窗口
+        send({
+          type: 'status',
+          taskId: sessionInfo.session_id,
+          status: data.status,
+          progress: data.progress,
+          message: data.message
+        });
+        
+        // 如果处理完成，获取结果图像
+        if (data.status === 'completed' && data.result_url) {
+          send({
+            type: 'result',
+            taskId: sessionInfo.session_id,
+            imageUrl: data.result_url
+          });
+        }
+      }
     });
     
   } catch (error) {
@@ -337,7 +343,7 @@ async function generateImage() {
 }
 
 // 打开结果窗口
-function openResultWindow() {
+function openResultWindow(sessionId: string) {
   // 如果已经有打开的窗口且未关闭，则不需要再次打开
   if (resultWindow.value && !resultWindow.value.closed) {
     resultWindow.value.focus();
@@ -345,7 +351,7 @@ function openResultWindow() {
   }
   
   // 打开新窗口
-  const url = `/aigc-result`;
+  const url = `/aigc-result?sessionId=${sessionId}`;
   resultWindow.value = window.open(url, 'img2img_result');
   
   // 检查窗口是否成功打开

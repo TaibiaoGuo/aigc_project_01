@@ -2,7 +2,7 @@
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import ResultDisplay from '@/components/ResultDisplay.vue';
-import { uploadImage, submitPrompt, pollTaskStatus, getGeneratedImage } from '@/services/comfyuiService';
+import { getGeneratedImage, createWebSocketConnection } from '@/services/comfyuiService';
 import { useCommunication, ChannelMessage } from '@/services/channelService';
 
 const route = useRoute();
@@ -11,128 +11,84 @@ const { lastMessage, send, unsubscribe } = useCommunication();
 const width = ref(512);
 const height = ref(512);
 const resultImage = ref('');
-const isLoading = ref(false);
+const isLoading = ref(true);
 const errorMessage = ref('');
 const processingStatus = ref('等待接收数据...');
-const promptId = ref('');
 
-// 从 URL 获取任务 ID
-const taskIdFromUrl = route.query.taskId as string;
-if (taskIdFromUrl) {
-  promptId.value = taskIdFromUrl;
-}
+// 从 URL 获取会话 ID
+const sessionId = route.query.sessionId as string;
+let wsConnection: any = null;
 
-// 处理图像生成
-async function handleImageGeneration(data: any) {
-  try {
-    isLoading.value = true;
-    errorMessage.value = '';
-    processingStatus.value = '正在上传图像...';
-    
-    const imageName = await uploadImage(data.imageData);
-    
-    processingStatus.value = '正在提交工作流...';
-    const taskId = await submitPrompt(
-      imageName,
-      data.positivePrompt,
-      data.negativePrompt
-    );
-    promptId.value = taskId;
-    
-    processingStatus.value = '正在处理图像...';
-    const resultFilename = await pollTaskStatus(taskId, (progress, total) => {
-      processingStatus.value = `正在处理中 (${progress}/${total})...`;
-      
-      // 发送状态更新消息
-      send({
-        type: 'status',
-        taskId,
-        status: `正在处理中 (${progress}/${total})...`,
-        progress,
-        total
-      });
-    });
-    
-    processingStatus.value = '正在获取生成结果...';
-    const imageDataUrl = await getGeneratedImage(resultFilename);
-    
-    // 保存结果
-    resultImage.value = imageDataUrl;
+// 初始化WebSocket连接
+function initWebSocket() {
+  if (!sessionId) {
+    errorMessage.value = '未提供会话ID';
     isLoading.value = false;
-    processingStatus.value = '';
-    
-    // 发送结果消息
-    send({
-      type: 'result',
-      taskId,
-      imageUrl: imageDataUrl
-    });
-  } catch (error) {
-    console.error('处理图像时出错:', error);
-    errorMessage.value = error instanceof Error ? error.message : '处理图像时出错';
-    isLoading.value = false;
-    
-    // 发送错误状态
-    if (promptId.value) {
-      send({
-        type: 'status',
-        taskId: promptId.value,
-        status: `错误: ${errorMessage.value}`
-      });
-    }
+    return;
   }
-}
-
-// 监听消息变化
-watch(lastMessage, (message) => {
-  if (!message) return;
   
-  if (message.type === 'task') {
-    // 如果收到任务消息，处理图像生成
-    handleImageGeneration(message);
-  }
-});
+  wsConnection = createWebSocketConnection(sessionId, {
+    onOpen: () => {
+      processingStatus.value = '已连接到服务器，等待处理...';
+    },
+    onMessage: async (data) => {
+      // 更新状态
+      if (data.status) {
+        processingStatus.value = data.message || `状态: ${data.status}`;
+        
+        if (data.progress) {
+          processingStatus.value = `正在处理中 (${data.progress * 100}%)...`;
+        }
+        
+        // 如果处理完成，获取结果图像
+        if (data.status === 'completed' && data.result_url) {
+          try {
+            resultImage.value = await getGeneratedImage(sessionId);
+            isLoading.value = false;
+          } catch (error) {
+            console.error('获取结果图像时出错:', error);
+            errorMessage.value = '获取结果图像失败';
+            isLoading.value = false;
+          }
+        }
+        
+        // 如果处理出错
+        if (data.status === 'error') {
+          errorMessage.value = data.message || '处理图像时出错';
+          isLoading.value = false;
+        }
+      }
+    },
+    onError: () => {
+      errorMessage.value = 'WebSocket连接错误';
+      isLoading.value = false;
+    },
+    onClose: () => {
+      console.log('WebSocket连接已关闭');
+    }
+  });
+}
 
-// 在页面加载时发送就绪消息
+// 在页面加载时初始化WebSocket
 onMounted(() => {
+  initWebSocket();
+  
   // 发送就绪消息
   send({
     type: 'status',
     taskId: 'system',
     status: 'ready'
   });
-  
-  // 页面关闭前的处理
-  window.addEventListener('beforeunload', () => {
-    send({
-      type: 'status',
-      taskId: 'system',
-      status: 'closed'
-    });
-  });
 });
 
-// 组件卸载时取消订阅
+// 组件卸载时关闭WebSocket连接
 onBeforeUnmount(() => {
+  if (wsConnection) {
+    wsConnection.close();
+  }
   unsubscribe();
 });
 </script>
-
-<template>
-  <div class="result-page-container p-6">
-    <h1 class="text-2xl font-bold mb-6 text-center text-dark dark:text-light">AI 图像生成结果</h1>
-    
-    <ResultDisplay
-      :width="width"
-      :height="height"
-      :result-image="resultImage"
-      :is-loading="isLoading"
-      :error-message="errorMessage"
-      :processing-status="processingStatus"
-      :prompt-id="promptId"
-    />
-  </div>
-</template>
 
 <style scoped>
 .result-page-container {

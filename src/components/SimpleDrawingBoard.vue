@@ -6,6 +6,7 @@ import BrushSelector from './BrushSelector.vue';
 import { createBrush, BrushType } from '@/utils/brushes';
 import { BaseBrush } from '@/utils/brushes';
 import { useCommunication, communicationService } from '@/services/channelService'; // 修改导入
+import { uploadSketch, createWebSocketConnection } from '@/services/comfyuiService';
 
 const router = useRouter();
 
@@ -254,12 +255,60 @@ function getImageData(): string | null {
   return canvasRef.value.toDataURL('image/png');
 }
 
-// 简化发送图像数据到DisplayBoard的函数
-function sendImageToDisplayBoard(imageData: string) {
-  send({
-    type: 'canvas_update',
-    imageData
-  });
+
+
+// 修改发送图像到DisplayBoard的函数
+async function sendImageToDisplayBoard(imageData: string) {
+  try {
+    // 上传草图到后端
+    const sessionInfo = await uploadSketch(imageData, 'realistic');
+    
+    // 创建WebSocket连接
+    const wsConnection = createWebSocketConnection(sessionInfo.session_id, {
+      onMessage: (data) => {
+        // 发送状态更新到DisplayBoard
+        send({
+          type: 'status',
+          taskId: sessionInfo.session_id,
+          status: data.status,
+          progress: data.progress || 0,
+          total: 100
+        });
+        
+        // 如果处理完成，发送结果URL
+        if (data.status === 'completed' && data.result_url) {
+          send({
+            type: 'result',
+            taskId: sessionInfo.session_id,
+            imageUrl: data.result_url
+          });
+        }
+      }
+    });
+    
+    // 发送草图数据到DisplayBoard
+    send({
+      type: 'canvas_update',
+      imageData: imageData
+    });
+    
+    // 发送生成状态
+    send({
+      type: 'status',
+      taskId: 'drawing-board',
+      status: 'generating'
+    });
+    
+  } catch (error) {
+    console.error('发送图像时出错:', error);
+    // 发送错误状态
+    send({
+      type: 'status',
+      taskId: 'drawing-board',
+      status: 'error',
+      message: '发送图像时出错'
+    });
+  }
 }
 
 // 添加自动同步功能 - 在绘制结束时自动发送画布数据

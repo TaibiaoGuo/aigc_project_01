@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>实时绘画演示</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+        }
+        .drawing-area {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
+        }
+        .canvas-container {
+            position: relative;
+            border: 1px solid #ccc;
+            background-color: white;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+            cursor: crosshair;
+        }
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            padding: 20px;
+            background-color: white;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            min-width: 250px;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        label {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        select, input {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            padding: 10px 15px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        button:disabled {
+            background-color: #95a5a6;
+            cursor: not-allowed;
+        }
+        .color-picker {
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+        }
+        .color {
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            cursor: pointer;
+            border: 2px solid transparent;
+        }
+        .color.active {
+            border-color: #2c3e50;
+        }
+        .result-container {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .result-image {
+            max-width: 100%;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            display: none;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+            font-weight: bold;
+        }
+        .status.processing {
+            background-color: #f1c40f;
+            color: #7f8c8d;
+        }
+        .status.completed {
+            background-color: #2ecc71;
+            color: white;
+        }
+        .status.error {
+            background-color: #e74c3c;
+            color: white;
+        }
+        .progress-container {
+            width: 100%;
+            background-color: #ddd;
+            border-radius: 4px;
+            margin-top: 10px;
+            display: none;
+        }
+        .progress-bar {
+            height: 10px;
+            background-color: #3498db;
+            border-radius: 4px;
+            width: 0%;
+            transition: width 0.3s;
+        }
+        .brush-size-slider {
+            width: 100%;
+        }
+        .brush-preview {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background-color: black;
+            margin: 10px auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>实时绘画演示</h1>
+        
+        <div class="drawing-area">
+            <div class="canvas-container">
+                <canvas id="drawingCanvas" width="512" height="512"></canvas>
+            </div>
+            
+            <div class="controls">
+                <div class="control-group">
+                    <label for="styleSelect">选择风格</label>
+                    <select id="styleSelect">
+                        <!-- 风格选项将通过JavaScript动态加载 -->
+                    </select>
+                </div>
+                
+                <div class="control-group">
+                    <label>画笔颜色</label>
+                    <div class="color-picker">
+                        <div class="color active" style="background-color: black;" data-color="black"></div>
+                        <div class="color" style="background-color: white;" data-color="white"></div>
+                        <div class="color" style="background-color: red;" data-color="red"></div>
+                        <div class="color" style="background-color: green;" data-color="green"></div>
+                        <div class="color" style="background-color: blue;" data-color="blue"></div>
+                        <div class="color" style="background-color: yellow;" data-color="yellow"></div>
+                    </div>
+                </div>
+                
+                <div class="control-group">
+                    <label for="brushSize">画笔大小: <span id="brushSizeValue">5</span>px</label>
+                    <input type="range" id="brushSize" class="brush-size-slider" min="1" max="50" value="5">
+                    <div class="brush-preview" id="brushPreview"></div>
+                </div>
+                
+                <button id="clearButton">清空画布</button>
+                <button id="generateButton">生成图像</button>
+            </div>
+        </div>
+        
+        <div class="result-container">
+            <div class="status" id="statusMessage"></div>
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+            <img id="resultImage" class="result-image" alt="生成的图像">
+        </div>
+    </div>
+
+    <script>
+        // 获取DOM元素
+        const canvas = document.getElementById('drawingCanvas');
+        const ctx = canvas.getContext('2d');
+        const clearButton = document.getElementById('clearButton');
+        const generateButton = document.getElementById('generateButton');
+        const styleSelect = document.getElementById('styleSelect');
+        const colorPicker = document.querySelectorAll('.color');
+        const brushSize = document.getElementById('brushSize');
+        const brushSizeValue = document.getElementById('brushSizeValue');
+        const brushPreview = document.getElementById('brushPreview');
+        const statusMessage = document.getElementById('statusMessage');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressBar = document.getElementById('progressBar');
+        const resultImage = document.getElementById('resultImage');
+        
+        // 初始化画布
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // 绘画状态
+        let isDrawing = false;
+        let currentColor = 'black';
+        let currentBrushSize = 5;
+        let sessionId = null;
+        let ws = null;
+        
+        // 加载可用风格
+        async function loadStyles() {
+            try {
+                const response = await fetch('/api/styles');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                const styles = data.styles;
+                
+                // 清空现有选项
+                styleSelect.innerHTML = '';
+                
+                // 添加风格选项
+                styles.forEach(style => {
+                    const option = document.createElement('option');
+                    option.value = style;
+                    option.textContent = style.charAt(0).toUpperCase() + style.slice(1).replace('_', ' ');
+                    styleSelect.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Error loading styles:', error);
+                // 添加默认风格选项
+                const option = document.createElement('option');
+                option.value = 'realistic';
+                option.textContent = '写实风格';
+                styleSelect.appendChild(option);
+            }
+        }
+        
+        // 页面加载时加载风格
+        window.addEventListener('load', loadStyles);
+        
+        // 更新画笔预览
+        function updateBrushPreview() {
+            brushPreview.style.width = `${currentBrushSize}px`;
+            brushPreview.style.height = `${currentBrushSize}px`;
+            brushPreview.style.backgroundColor = currentColor;
+        }
+        updateBrushPreview();
+        
+        // 绘画事件监听
+        canvas.addEventListener('mousedown', startDrawing);
+        canvas.addEventListener('mousemove', draw);
+        canvas.addEventListener('mouseup', stopDrawing);
+        canvas.addEventListener('mouseout', stopDrawing);
+        
+        // 触摸事件支持
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const touch = e.touches[0];
+            const mouseEvent = new MouseEvent('mousedown', {
+                clientX: touch.clientX,
+                clientY: touch.clientY
+            });
+            canvas.dispatchEvent(mouseEvent);
+        });
+        
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            const touch = e.touches[0];
+            const mouseEvent = new MouseEvent('mousemove', {
+                clientX: touch.clientX,
+                clientY: touch.clientY
+            });
+            canvas.dispatchEvent(mouseEvent);
+        });
+        
+        canvas.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            const mouseEvent = new MouseEvent('mouseup');
+            canvas.dispatchEvent(mouseEvent);
+        });
+        
+        // 绘画函数
+        function startDrawing(e) {
+            isDrawing = true;
+            draw(e);
+        }
+        
+        function draw(e) {
+            if (!isDrawing) return;
+            
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            ctx.lineWidth = currentBrushSize;
+            ctx.lineCap = 'round';
+            ctx.strokeStyle = currentColor;
+            
+            ctx.lineTo(x, y);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+        }
+        
+        function stopDrawing() {
+            if (isDrawing) {
+                ctx.beginPath();
+                isDrawing = false;
+                
+                // 如果已连接WebSocket，发送草图更新
+                if (ws && ws.readyState === WebSocket.OPEN && sessionId) {
+                    sendSketchUpdate();
+                }
+            }
+        }
+        
+        // 清空画布
+        clearButton.addEventListener('click', () => {
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        });
+        
+        // 选择颜色
+        colorPicker.forEach(color => {
+            color.addEventListener('click', () => {
+                // 移除所有active类
+                colorPicker.forEach(c => c.classList.remove('active'));
+                // 添加active类到当前选中的颜色
+                color.classList.add('active');
+                currentColor = color.getAttribute('data-color');
+                updateBrushPreview();
+            });
+        });
+        
+        // 调整画笔大小
+        brushSize.addEventListener('input', () => {
+            currentBrushSize = brushSize.value;
+            brushSizeValue.textContent = currentBrushSize;
+            updateBrushPreview();
+        });
+        
+        // 生成图像
+        generateButton.addEventListener('click', async () => {
+            // 禁用按钮防止重复点击
+            generateButton.disabled = true;
+            statusMessage.textContent = "正在上传草图...";
+            statusMessage.className = "status processing";
+            
+            try {
+                // 将画布内容转换为blob
+                const blob = await new Promise(resolve => {
+                    canvas.toBlob(resolve, 'image/png');
+                });
+                
+                // 创建FormData对象
+                const formData = new FormData();
+                formData.append('file', blob, 'sketch.png');
+                formData.append('style_name', styleSelect.value);
+                
+                // 如果已有会话ID，添加到请求中
+                if (sessionId) {
+                    formData.append('session_id', sessionId);
+                }
+                
+                // 发送请求
+                const response = await fetch('/api/sketch', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                sessionId = data.session_id;
+                
+                // 连接WebSocket
+                connectWebSocket(data.websocket_url);
+                
+                statusMessage.textContent = "已上传草图，等待处理...";
+            } catch (error) {
+                console.error('Error:', error);
+                statusMessage.textContent = `错误: ${error.message}`;
+                statusMessage.className = "status error";
+                generateButton.disabled = false;
+            }
+        });
+        
+        // 连接WebSocket
+        function connectWebSocket(url) {
+            // 关闭现有连接
+            if (ws) {
+                ws.close();
+            }
+            
+            // 创建新连接
+            ws = new WebSocket(`ws://${window.location.host}${url}`);
+            
+            ws.onopen = () => {
+                console.log('WebSocket连接已建立');
+                // 发送当前草图
+                sendSketchUpdate();
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                console.log('收到消息:', data);
+                
+                if (data.status === 'processing') {
+                    statusMessage.textContent = "正在处理...";
+                    statusMessage.className = "status processing";
+                    
+                    // 显示进度条
+                    if (data.progress !== undefined) {
+                        progressContainer.style.display = 'block';
+                        progressBar.style.width = `${data.progress * 100}%`;
+                    }
+                } else if (data.status === 'completed') {
+                    statusMessage.textContent = "处理完成！";
+                    statusMessage.className = "status completed";
+                    progressContainer.style.display = 'none';
+                    
+                    // 显示结果图像
+                    resultImage.src = data.result_url;
+                    resultImage.style.display = 'block';
+                    
+                    // 启用生成按钮
+                    generateButton.disabled = false;
+                } else if (data.status === 'error') {
+                    statusMessage.textContent = `错误: ${data.message}`;
+                    statusMessage.className = "status error";
+                    progressContainer.style.display = 'none';
+                    
+                    // 启用生成按钮
+                    generateButton.disabled = false;
+                }
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket错误:', error);
+                statusMessage.textContent = "WebSocket连接错误";
+                statusMessage.className = "status error";
+                generateButton.disabled = false;
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket连接已关闭');
+            };
+        }
+        
+        // 发送草图更新
+        function sendSketchUpdate() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const sketchData = canvas.toDataURL('image/png');
+                ws.send(JSON.stringify({
+                    type: 'sketch_update',
+                    sketch_data: sketchData
+                }));
+            }
+        }
+    </script>
+</body>
+</html>

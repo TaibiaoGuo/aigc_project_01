@@ -1,0 +1,67 @@
+{
+  "prompt": {
+    "3": {
+      "inputs": {
+        "seed": 123456789,
+        "steps": 30,
+        "cfg": 7.5,
+        "sampler_name": "euler_ancestral",
+        "scheduler": "normal",
+        "denoise": 0.8,
+        "model": ["4", 0],
+        "positive": ["6", 0],
+        "negative": ["7", 0],
+        "latent_image": ["8", 0]
+      },
+      "class_type": "KSampler"
+    },
+    "4": {
+      "inputs": {
+        "ckpt_name": "sd_xl_base_1.0"
+      },
+      "class_type": "CheckpointLoaderSimple"
+    },
+    "6": {
+      "inputs": {
+        "text": "masterpiece, best quality, realistic style, detailed",
+        "clip": ["4", 1]
+      },
+      "class_type": "CLIPTextEncode"
+    },
+    "7": {
+      "inputs": {
+        "text": "low quality, bad anatomy, worst quality, blurry",
+        "clip": ["4", 1]
+      },
+      "class_type": "CLIPTextEncode"
+    },
+    "8": {
+      "inputs": {
+        "pixels": ["9", 0],
+        "vae": ["4", 2]
+      },
+      "class_type": "VAEEncode"
+    },
+    "9": {
+      "inputs": {
+        "image": "PLACEHOLDER_PATH",
+        "upload": "image"
+      },
+      "class_type": "LoadImage"
+    },
+    "10": {
+      "inputs": {
+        "samples": ["3", 0],
+        "vae": ["4", 2]
+      },
+      "class_type": "VAEDecode"
+    },
+    "11": {
+      "inputs": {
+        "filename_prefix": "output",
+        "images": ["10", 0]
+      },
+      "class_type": "SaveImage"
+    }
+  }
+}

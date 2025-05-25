@@ -1,0 +1,17 @@
+detail:
+    loginTip: 'This is Detail Page, need login'
+
+common:
+    hello: '草稿生图'
+    welcome: 'Welcome, {name}'
+    template: Template
+    docs: Docs
+    example: Example
+    isSupported: isSupported
+    menus: Menus
+    home: Home
+    Detail: Detail
+
+home:
+    recommendIde: 'Recommended IDE setup'
+    remarks: 'See <code class="dark:text-ternary-dark">README.md</code> for more information.'

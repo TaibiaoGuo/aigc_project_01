@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_BACKEND_URL=http://backend:8000
+    ports:
+      - "80:80"
+    environment:
+      - VITE_BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - COMFYUI_SERVER=http://host.docker.internal:8188
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/results:/app/results
+      - ./backend/static:/app/static
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

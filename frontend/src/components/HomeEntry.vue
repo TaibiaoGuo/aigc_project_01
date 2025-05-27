@@ -19,12 +19,12 @@ const goToAdminLogin = () => {
       <div class="buttons-container">
         <!-- 开始按钮 -->
         <div class="start-button-wrapper" @click="startApp">
-          <img src="@/assets/images/icon/开始.svg" alt="开始" class="button-image" />
+          <img src="@/assets/images/icon/start.svg" alt="开始" class="button-image" />
         </div>
         
         <!-- 管理者模式按钮 -->
         <div class="admin-button-wrapper" @click="goToAdminLogin">
-          <img src="@/assets/images/icon/管理员模式.svg" alt="管理员模式" class="button-image" />
+          <img src="@/assets/images/icon/admin-mode.svg" alt="管理员模式" class="button-image" />
         </div>
       </div>
       

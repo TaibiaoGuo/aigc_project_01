@@ -22,6 +22,8 @@ const connectionStatus = reactive({
   retryCount: 0,
   maxRetries: 5,
   pollingInterval: 3000, // 3秒轮询一次
+  missedHeartbeats: 0,
+  maxMissedHeartbeats: 3
 });
 
 // 状态管理
@@ -67,13 +69,28 @@ function openDisplayBoard() {
   }
   
   // 等待窗口加载完成后发送握手消息
-  setTimeout(() => {
+  displayWindow.value.onload = () => {
     send({
       type: 'status',
       taskId: 'drawing-board',
       status: 'handshake'
     });
-  }, 1000);
+  };
+}
+
+// 添加检查连接状态的函数
+function checkConnection() {
+  if (!displayWindow.value || displayWindow.value.closed) {
+    // 窗口已关闭，尝试重新打开
+    openDisplayBoard();
+  } else if (!connectionStatus.connected) {
+    // 未连接，发送握手消息
+    send({
+      type: 'status',
+      taskId: 'drawing-board',
+      status: 'handshake'
+    });
+  }
 }
 
 // 启动心跳机制
@@ -89,8 +106,17 @@ function startHeartbeat() {
         taskId: 'drawing-board',
         status: 'heartbeat'
       });
+      
+      // 检查是否收到响应
+      if (Date.now() - connectionStatus.lastHeartbeat > 10000) {
+        connectionStatus.missedHeartbeats++;
+        if (connectionStatus.missedHeartbeats >= connectionStatus.maxMissedHeartbeats) {
+          // 连续3次未收到响应，认为连接断开
+          updateConnectionStatus(false);
+          checkConnection(); // 尝试重连
+        }
+      }
     } else {
-      // 如果窗口已关闭，停止心跳
       stopHeartbeat();
     }
   }, 5000); // 每5秒发送一次心跳
@@ -110,10 +136,11 @@ function updateConnectionStatus(connected: boolean) {
   connectionStatus.lastHeartbeat = Date.now();
   if (connected) {
     connectionStatus.retryCount = 0;
+    connectionStatus.missedHeartbeats = 0;
   }
 }
 
-// 在handleConfirm函数中添加发送图像数据的功能
+// 处理确认按钮点击
 function handleConfirm() {
   // 获取画布数据
   const imageData = getImageData();
@@ -198,11 +225,15 @@ onMounted(() => {
   
   // 自动打开DisplayBoard
   openDisplayBoard();
+  
   // 启动心跳机制
   startHeartbeat();
+  
+  // 启动定期检查连接状态
+  setInterval(checkConnection, connectionStatus.pollingInterval);
 });
 
-// 组件卸载时移除事件监听器
+// 组件卸载时清理
 onBeforeUnmount(() => {
   stopHeartbeat();
   unsubscribe();
@@ -476,6 +507,14 @@ function handleSignatureConfirm(data: string) {
   signatureData.value = data;
   showSignatureModal.value = false;
   console.log('签名数据已获取');
+  
+  // 如果DisplayBoard窗口已打开，发送签名数据
+  if (displayWindow.value && !displayWindow.value.closed) {
+    send({
+      type: 'signature',
+      signatureData: data
+    });
+  }
 }
 
 // 处理签名框关闭
@@ -651,7 +690,7 @@ function hideBrushTipHandler() {
           <div v-if="showBrushTip" class="brush-tip">
             点击设置画笔
           </div>
-          <img src="@/assets/images/icon/画笔.svg" alt="画笔" class="button-image pointer-events-auto" />
+          <img src="@/assets/images/icon/brush.svg" alt="画笔" class="button-image pointer-events-auto" />
           <!-- 当前画笔预览 -->
           <div class="absolute bottom-2 right-2 rounded-full border-2 border-white shadow-sm"
                :style="{
@@ -667,7 +706,7 @@ function hideBrushTipHandler() {
         <div class="tool-button-wrapper relative" 
              @click="handleEraserClick"
              :class="{'active-tool': drawingSettings.toolType === 'eraser'}">
-          <img src="@/assets/images/icon/橡皮擦.svg" alt="橡皮擦" class="button-image pointer-events-auto" />
+          <img src="@/assets/images/icon/eraser.svg" alt="橡皮擦" class="button-image pointer-events-auto" />
           <!-- 当前橡皮擦大小预览 -->
           <div v-if="drawingSettings.toolType === 'eraser'" class="absolute bottom-2 right-2 rounded-full border-2 border-white shadow-sm bg-white"
                :style="{
@@ -679,11 +718,11 @@ function hideBrushTipHandler() {
         </div>
         
         <div class="tool-button-wrapper" @click="undo">
-          <img src="@/assets/images/icon/撤回.svg" alt="撤回" class="button-image pointer-events-auto" />
+          <img src="@/assets/images/icon/undo.svg" alt="撤回" class="button-image pointer-events-auto" />
         </div>
         
         <div class="tool-button-wrapper" @click="handleSignatureConfirmOpen">
-          <img src="@/assets/images/icon/确定.svg" alt="确定" class="button-image pointer-events-auto" />
+          <img src="@/assets/images/icon/confirm.svg" alt="确定" class="button-image pointer-events-auto" />
         </div>
       </div>
     </div>

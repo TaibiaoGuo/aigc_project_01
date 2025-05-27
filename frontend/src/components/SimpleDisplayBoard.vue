@@ -40,6 +40,8 @@ const connectionStatus = reactive({
   retryCount: 0,
   maxRetries: 5,
   pollingInterval: 3000, // 3秒轮询一次
+  missedHeartbeats: 0,
+  maxMissedHeartbeats: 3
 });
 
 // 轮询定时器
@@ -60,45 +62,65 @@ onMounted(() => {
   // 保存初始状态到历史记录
   saveToHistory();
   
-  // 在监听消息的回调函数中添加对后端WebSocket消息的处理
+  // 发送初始握手消息
+  sendHandshake();
+  
+  // 启动定期检查连接状态
+  pollingTimer = window.setInterval(checkConnection, connectionStatus.pollingInterval);
+  
+  // 添加消息接收处理
   const unsubscribeFunc = receive((message) => {
     console.log('收到消息:', message);
-    displaySettings.receivedMessage = message;
-    messageReceived.value = true;
     
-    // 更新连接状态
+    // 处理握手消息
     if (message.type === 'status' && message.status === 'handshake') {
-      handleHandshake(message);
-    } else if (message.type === 'status' && message.status === 'heartbeat') {
-      updateConnectionStatus();
-    } else if (message.type === 'canvas_update' && message.imageData) {
-      // 直接显示画布数据
-      displayImage(message.imageData);
-      updateConnectionStatus();
-    } else if (message.type === 'task' && message.imageData) {
-      // 显示草稿图像
+      updateConnectionStatus(true);
+      sendHandshake();
+    }
+    // 处理心跳消息
+    else if (message.type === 'status' && message.status === 'heartbeat') {
+      updateConnectionStatus(true);
+      // 回复心跳
+      send({
+        type: 'status',
+        taskId: 'display-board',
+        status: 'heartbeat'
+      });
+    }
+    // 处理画布更新消息
+    else if (message.type === 'canvas_update' && message.imageData) {
+      displaySettings.receivedImage = message.imageData;
+      // 更新画布
+      updateCanvas();
+    }
+    // 处理草稿图像
+    else if (message.type === 'task' && message.imageData) {
       displaySettings.isDraftDisplayed = true;
       displaySettings.hasNetworkError = false; // 重置错误状态
       displayImage(message.imageData);
-      updateConnectionStatus();
-    } else if (message.type === 'status' && message.status === 'generating') {
-      // 标记AI正在生成中
+      updateConnectionStatus(true);
+    }
+    // 处理AI生成状态
+    else if (message.type === 'status' && message.status === 'generating') {
       displaySettings.isAIGenerating = true;
       displaySettings.hasNetworkError = false; // 重置错误状态
       
       // 设置请求超时计时器
       startRequestTimeoutTimer();
-    } else if (message.type === 'status' && message.status === 'processing') {
-      // 处理后端处理状态更新
+    }
+    // 处理后端处理状态更新
+    else if (message.type === 'status' && message.status === 'processing') {
       displaySettings.isAIGenerating = true;
       displaySettings.hasNetworkError = false;
       // 重置超时计时器
       startRequestTimeoutTimer();
-    } else if (message.type === 'status' && message.status === 'error') {
-      // 处理错误状态
+    }
+    // 处理错误状态
+    else if (message.type === 'status' && message.status === 'error') {
       handleRequestError();
-    } else if (message.type === 'result' && message.imageUrl) {
-      // 处理结果图片URL - AI生成完成
+    }
+    // 处理结果图片URL - AI生成完成
+    else if (message.type === 'result' && message.imageUrl) {
       clearRequestTimeoutTimer(); // 清除超时计时器
       displaySettings.isAIGenerating = false;
       displaySettings.hasNetworkError = false; // 重置错误状态
@@ -138,7 +160,7 @@ onMounted(() => {
         saveToHistory();
       };
       img.src = imageUrl;
-      updateConnectionStatus();
+      updateConnectionStatus(true);
     }
   });
 });
@@ -177,10 +199,13 @@ function handleRequestError() {
   });
 }
 
-// 组件卸载时移除事件监听器和定时器
+// 组件卸载时清理
 onBeforeUnmount(() => {
+  if (pollingTimer) {
+    clearInterval(pollingTimer);
+    pollingTimer = null;
+  }
   unsubscribe();
-  stopConnectionPolling();
   clearRequestTimeoutTimer();
 });
 
@@ -189,30 +214,27 @@ function sendHandshake() {
   send({
     type: 'status',
     taskId: 'display-board',
-    status: 'handshake',
-    progress: 0,
-    total: 100
+    status: 'connected'
   });
-  console.log('发送握手消息');
-}
-
-// 处理握手响应
-function handleHandshake(message: any) {
-  updateConnectionStatus();
 }
 
 // 更新连接状态
-function updateConnectionStatus() {
-  connectionStatus.connected = true;
+function updateConnectionStatus(connected: boolean) {
+  connectionStatus.connected = connected;
   connectionStatus.lastHeartbeat = Date.now();
-  connectionStatus.retryCount = 0;
+  if (connected) {
+    connectionStatus.retryCount = 0;
+    connectionStatus.missedHeartbeats = 0;
+  }
 }
 
-// 停止连接轮询
-function stopConnectionPolling() {
-  if (pollingTimer) {
-    clearInterval(pollingTimer);
-    pollingTimer = null;
+// 检查连接状态
+function checkConnection() {
+  if (Date.now() - connectionStatus.lastHeartbeat > 10000) {
+    // 10秒未收到心跳，认为连接断开
+    connectionStatus.connected = false;
+    // 尝试重新建立连接
+    sendHandshake();
   }
 }
 

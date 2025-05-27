@@ -101,7 +101,7 @@ const blurPassword = () => {
         <!-- 登录按钮 - 直接使用SVG图片 -->
         <div class="login-button-container">
           <img 
-            src="@/assets/images/icon/快速登录.svg" 
+            src="@/assets/images/icon/quick-login.svg" 
             alt="快速登录" 
             class="login-button-image" 
             @click="handleLogin"

@@ -14,6 +14,7 @@ export interface StatusMessage {
   status: string;
   progress?: number;
   total?: number;
+  message?: string;
 }
 
 export interface ResultMessage {
@@ -22,7 +23,17 @@ export interface ResultMessage {
   imageUrl: string;
 }
 
-export type ChannelMessage = TaskMessage | StatusMessage | ResultMessage;
+export interface CanvasUpdateMessage {
+  type: 'canvas_update';
+  imageData: string;
+}
+
+export interface SignatureMessage {
+  type: 'signature';
+  signatureData: string;
+}
+
+export type ChannelMessage = TaskMessage | StatusMessage | ResultMessage | CanvasUpdateMessage | SignatureMessage;
 
 // 通信策略接口，用于支持不同的通信方式
 export interface CommunicationStrategy {

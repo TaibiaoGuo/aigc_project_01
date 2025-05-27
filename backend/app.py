@@ -83,27 +83,6 @@ def base64_to_image(base64_string, output_path):
         f.write(img_data)
     return output_path
 
-# 辅助函数：预处理草图
-def preprocess_sketch(sketch_path, output_path=None):
-    """预处理草图，增强线条并清理背景"""
-    if output_path is None:
-        output_path = sketch_path
-    
-    # 读取图像
-    img = cv2.imread(sketch_path, cv2.IMREAD_GRAYSCALE)
-    
-    # 应用自适应阈值处理，增强线条
-    thresh = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                  cv2.THRESH_BINARY_INV, 11, 2)
-    
-    # 去除噪点
-    kernel = np.ones((2, 2), np.uint8)
-    cleaned = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-    
-    # 保存处理后的图像
-    cv2.imwrite(output_path, cleaned)
-    return output_path
-
 # 与ComfyUI通信的函数
 async def send_to_comfyui(sketch_path, style_config, session_id):
     """发送草图到ComfyUI并获取生成的图像"""
@@ -240,12 +219,8 @@ async def process_sketch_task(session_id: str):
                 "message": "Processing sketch..."
             })
         
-        # 预处理草图
-        processed_sketch = preprocess_sketch(session.sketch_path)
-        
-        # 发送到ComfyUI处理
-        # 这里将model_config改为style_config
-        result_path = await send_to_comfyui(processed_sketch, session.style_config, session_id)
+        # 直接发送到ComfyUI处理，不进行预处理
+        result_path = await send_to_comfyui(session.sketch_path, session.style_config, session_id)
         
         if result_path:
             session.result_path = result_path

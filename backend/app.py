@@ -84,120 +84,128 @@ def base64_to_image(base64_string, output_path):
     return output_path
 
 # 与ComfyUI通信的函数
+async def send_workflow_to_comfyui(session: aiohttp.ClientSession, workflow: dict) -> Optional[str]:
+    """发送工作流到ComfyUI并获取prompt_id"""
+    async with session.post(f"{COMFYUI_SERVER}/api/prompt", json=workflow) as response:
+        if response.status != 200:
+            error_text = await response.text()
+            logger.error(f"发送工作流到 ComfyUI 失败: {error_text}")
+            return None
+        
+        prompt_response = await response.json()
+        prompt_id = prompt_response.get('prompt_id')
+        if not prompt_id:
+            logger.error("未收到 prompt_id")
+            return None
+        
+        logger.info(f"从 ComfyUI 获取到 prompt_id: {prompt_id}")
+        return prompt_id
+
+async def wait_for_comfyui_processing(session: aiohttp.ClientSession, prompt_id: str, session_id: str) -> bool:
+    """等待ComfyUI处理完成并发送进度更新"""
+    while True:
+        async with session.get(f"{COMFYUI_SERVER}/api/history") as history_response:
+            history_data = await history_response.json()
+            queue_data = history_data.get(prompt_id, {})
+            status = queue_data.get('status', {})
+            
+            if status.get('status_str') == 'success' and status.get('completed'):
+                logger.info(f"ComfyUI 处理完成，prompt_id: {prompt_id}")
+                return True
+            elif status.get('status_str') == 'error':
+                error_msg = status.get('error')
+                logger.error(f"ComfyUI 处理出错: {error_msg}")
+                return False
+            
+            # 发送进度更新
+            if session_id in active_sessions and active_sessions[session_id].websocket:
+                progress = calculate_progress(status.get('messages', []))
+                if os.environ.get("ENVIRONMENT") == "development":
+                    logger.debug(f"处理进度: {progress * 100:.1f}%")
+                
+                await active_sessions[session_id].websocket.send_json({
+                    "status": "processing",
+                    "progress": progress
+                })
+            
+            await asyncio.sleep(0.5)
+
+def calculate_progress(messages: List) -> float:
+    """计算处理进度"""
+    if not messages:
+        return 0
+    total_messages = len(messages)
+    completed_messages = sum(1 for msg in messages if msg[0] in ['execution_cached', 'execution_success'])
+    return completed_messages / total_messages if total_messages > 0 else 0
+
+async def get_comfyui_result(session: aiohttp.ClientSession, prompt_id: str) -> Optional[str]:
+    """获取ComfyUI处理结果"""
+    async with session.get(f"{COMFYUI_SERVER}/api/history/{prompt_id}") as history_response:
+        history_data = await history_response.json()
+        
+        if os.environ.get("ENVIRONMENT") == "development":
+            logger.debug(f"获取到历史记录: {json.dumps(history_data, indent=2)}")
+        
+        prompt_data = history_data.get(prompt_id, {})
+        if not prompt_data:
+            logger.error(f"未找到 prompt_id {prompt_id} 的数据")
+            return None
+            
+        outputs = prompt_data.get('outputs', {})
+        if not outputs:
+            logger.error("历史记录中未找到输出")
+            return None
+        
+        image_output = find_image_output(outputs)
+        if not image_output:
+            logger.error("未找到图像输出")
+            return None
+        
+        return construct_output_path(image_output)
+
+def find_image_output(outputs: Dict) -> Optional[Dict]:
+    """在输出中查找图像节点"""
+    for node_id, node_output in outputs.items():
+        if 'images' in node_output:
+            return node_output['images'][0]
+    return None
+
+def construct_output_path(image_output: Dict) -> Optional[str]:
+    """构建输出文件路径"""
+    image_filename = image_output['filename']
+    image_subfolder = image_output.get('subfolder', '')
+    
+    output_path = os.path.join("output", image_filename)
+    if image_subfolder:
+        output_path = os.path.join("output", image_subfolder, image_filename)
+    
+    if not os.path.exists(output_path):
+        logger.error(f"输出文件不存在: {output_path}")
+        return None
+    
+    return output_path
+
 async def send_to_comfyui(sketch_path, style_config, session_id):
     """发送草图到ComfyUI并获取生成的图像"""
     try:
         logger.info(f"开始处理会话 {session_id} 的草图: {sketch_path}")
-        # 构建ComfyUI工作流
         workflow = create_comfyui_workflow(sketch_path, style_config)
         logger.info(f"已创建工作流，使用风格: {style_config.style_name}")
         
-        # 发送请求到ComfyUI
         async with aiohttp.ClientSession() as session:
             # 1. 发送工作流
-            logger.info(f"正在发送工作流到 ComfyUI: {COMFYUI_SERVER}/api/prompt")
-            async with session.post(f"{COMFYUI_SERVER}/api/prompt", json=workflow) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"发送工作流到 ComfyUI 失败: {error_text}")
-                    return None
-                
-                prompt_response = await response.json()
-                prompt_id = prompt_response.get('prompt_id')
-                logger.info(f"从 ComfyUI 获取到 prompt_id: {prompt_id}")
-                
-                if not prompt_id:
-                    logger.error("未收到 prompt_id")
-                    return None
-                
-                # 2. 等待处理完成
-                logger.info(f"开始等待 ComfyUI 处理完成，prompt_id: {prompt_id}")
-                while True:
-                    async with session.get(f"{COMFYUI_SERVER}/api/history") as history_response:
-                        history_data = await history_response.json()
-                        queue_data = history_data.get(prompt_id, {})
-                        status = queue_data.get('status', {})
-                        
-                        # 检查状态
-                        if status.get('status_str') == 'success' and status.get('completed'):
-                            logger.info(f"ComfyUI 处理完成，prompt_id: {prompt_id}")
-                            break
-                        elif status.get('status_str') == 'error':
-                            error_msg = status.get('error')
-                            logger.error(f"ComfyUI 处理出错: {error_msg}")
-                            return None
-                        
-                        # 发送进度更新
-                        if session_id in active_sessions and active_sessions[session_id].websocket:
-                            # 计算进度
-                            messages = status.get('messages', [])
-                            if messages:
-                                # 根据消息数量估算进度
-                                total_messages = len(messages)
-                                completed_messages = sum(1 for msg in messages if msg[0] in ['execution_cached', 'execution_success'])
-                                progress = completed_messages / total_messages if total_messages > 0 else 0
-                            else:
-                                progress = 0
-                            
-                            if os.environ.get("ENVIRONMENT") == "development":
-                                logger.debug(f"处理进度: {progress * 100:.1f}%")
-                            
-                            await active_sessions[session_id].websocket.send_json({
-                                "status": "processing",
-                                "progress": progress
-                            })
-                        
-                        await asyncio.sleep(0.5)
-                
-                # 3. 获取结果
-                logger.info(f"正在获取处理结果，prompt_id: {prompt_id}")
-                async with session.get(f"{COMFYUI_SERVER}/api/history/{prompt_id}") as history_response:
-                    history_data = await history_response.json()
-                    
-                    if os.environ.get("ENVIRONMENT") == "development":
-                        logger.debug(f"获取到历史记录: {json.dumps(history_data, indent=2)}")
-                    
-                    # 从历史记录中提取图像节点的输出
-                    prompt_data = history_data.get(prompt_id, {})
-                    if not prompt_data:
-                        logger.error(f"未找到 prompt_id {prompt_id} 的数据")
-                        return None
-                        
-                    outputs = prompt_data.get('outputs', {})
-                    if not outputs:
-                        logger.error("历史记录中未找到输出")
-                        return None
-                    
-                    # 找到 SaveImage 节点的输出
-                    image_output = None
-                    for node_id, node_output in outputs.items():
-                        if 'images' in node_output:
-                            image_output = node_output['images'][0]
-                            logger.debug(f"找到图像输出: {image_output['filename']}")
-                            break
-                    
-                    if not image_output:
-                        logger.error("未找到图像输出")
-                        return None
-                    
-                    # 获取文件名和子文件夹
-                    image_filename = image_output['filename']
-                    image_subfolder = image_output.get('subfolder', '')
-                    logger.debug(f"生成图片: {image_filename}, 子文件夹: {image_subfolder}")
-                    
-                    # 构建完整的输出文件路径
-                    output_path = os.path.join("output", image_filename)
-                    if image_subfolder:
-                        output_path = os.path.join("output", image_subfolder, image_filename)
-                    logger.debug(f"完整输出路径: {output_path}")
-                    
-                    # 检查文件是否存在
-                    if not os.path.exists(output_path):
-                        logger.error(f"输出文件不存在: {output_path}")
-                        return None
-                    
-                    # 直接返回输出文件路径
-                    return output_path
+            prompt_id = await send_workflow_to_comfyui(session, workflow)
+            if not prompt_id:
+                return None
+            
+            # 2. 等待处理完成
+            success = await wait_for_comfyui_processing(session, prompt_id, session_id)
+            if not success:
+                return None
+            
+            # 3. 获取结果
+            return await get_comfyui_result(session, prompt_id)
+            
     except Exception as e:
         logger.error(f"处理过程中出错: {str(e)}")
         return None

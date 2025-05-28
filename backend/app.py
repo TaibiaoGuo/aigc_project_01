@@ -8,85 +8,129 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, F
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any, Union
 import base64
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor
 import glob
+from pathlib import Path
+from dataclasses import dataclass
+from enum import Enum
 
-# 配置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# 配置类
+class Environment(str, Enum):
+    DEVELOPMENT = "development"
+    PRODUCTION = "production"
 
-# 创建FastAPI应用
-app = FastAPI(title="Real-time Drawing API", description="API for real-time drawing with ComfyUI backend")
+class Config:
+    """应用配置"""
+    ENV: Environment = Environment(os.getenv("ENVIRONMENT", "development"))
+    COMFYUI_SERVER: str = os.getenv("COMFYUI_SERVER", "http://127.0.0.1:8188")
+    MAX_WORKERS: int = int(os.getenv("MAX_WORKERS", "4"))
+    SESSION_TIMEOUT: int = int(os.getenv("SESSION_TIMEOUT", "3600"))  # 1小时
+    CLEANUP_INTERVAL: int = int(os.getenv("CLEANUP_INTERVAL", "600"))  # 10分钟
+    UPLOAD_DIR: str = "uploads"
+    OUTPUT_DIR: str = "output"
+    STATIC_DIR: str = "static"
+    WORKFLOW_DIR: str = "workflow"
 
-# 添加CORS中间件
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # 允许所有来源，生产环境中应该限制
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-    max_age=3600,
-)
+config = Config()
 
-# 挂载静态文件目录
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# 日志配置
+def setup_logging():
+    """配置日志"""
+    log_level = logging.DEBUG if config.ENV == Environment.DEVELOPMENT else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    return logging.getLogger(__name__)
 
-# ComfyUI服务器配置
-COMFYUI_SERVER = os.environ.get("COMFYUI_SERVER", "http://127.0.0.1:8188")
+logger = setup_logging()
 
-# 存储用户会话
-active_sessions = {}
-
-# 线程池执行器，用于处理图像生成任务
-executor = ThreadPoolExecutor(max_workers=4)  # 根据GPU能力调整
-
-# 风格配置
+# 数据模型
 class StyleConfig(BaseModel):
-    style_name: str = "realistic"  # 默认风格
+    """风格配置"""
+    style_name: str = Field(default="realistic", description="风格名称")
 
-# 会话状态
+class WebSocketMessage(BaseModel):
+    """WebSocket消息模型"""
+    type: str
+    sketch_data: Optional[str] = None
+    style: Optional[str] = None
+    image_data: Optional[str] = None
+
+@dataclass
 class Session:
-    def __init__(self, session_id: str):
-        self.session_id = session_id
-        self.sketch_path = None
-        self.result_path = None
-        self.style_config = None
-        self.is_processing = False
-        self.last_update = time.time()
-        self.websocket = None
-        self.needs_reprocess = False
+    """会话状态"""
+    session_id: str
+    sketch_path: Optional[str] = None
+    result_path: Optional[str] = None
+    style_config: Optional[StyleConfig] = None
+    is_processing: bool = False
+    last_update: float = Field(default_factory=time.time)
+    websocket: Optional[WebSocket] = None
+    needs_reprocess: bool = False
 
+# 应用状态
+class AppState:
+    """应用状态管理"""
+    def __init__(self):
+        self.active_sessions: Dict[str, Session] = {}
+        self.executor = ThreadPoolExecutor(max_workers=config.MAX_WORKERS)
+
+    def create_session(self, session_id: str) -> Session:
+        """创建新会话"""
+        session = Session(session_id=session_id)
+        self.active_sessions[session_id] = session
+        return session
+
+    def get_session(self, session_id: str) -> Optional[Session]:
+        """获取会话"""
+        return self.active_sessions.get(session_id)
+
+    def remove_session(self, session_id: str):
+        """移除会话"""
+        if session_id in self.active_sessions:
+            del self.active_sessions[session_id]
+
+    def cleanup_expired_sessions(self):
+        """清理过期会话"""
+        current_time = time.time()
+        expired_sessions = [
+            session_id for session_id, session in self.active_sessions.items()
+            if current_time - session.last_update > config.SESSION_TIMEOUT
+        ]
+        for session_id in expired_sessions:
+            self.remove_session(session_id)
+            logger.info(f"Cleaned up expired session {session_id}")
+
+state = AppState()
+
+# 工具函数
 def create_required_directories():
-    """创建所需的目录"""
-    directories = ["uploads", "output", "static"]
-    for directory in directories:
-        os.makedirs(directory, exist_ok=True)
+    """创建必要的目录"""
+    for directory in [config.UPLOAD_DIR, config.OUTPUT_DIR, config.STATIC_DIR]:
+        Path(directory).mkdir(parents=True, exist_ok=True)
 
-# 创建必要的目录
-create_required_directories()
-
-# 辅助函数：将图像转换为base64
-def image_to_base64(image_path):
+def image_to_base64(image_path: str) -> str:
+    """将图像转换为base64"""
     with open(image_path, "rb") as img_file:
         return base64.b64encode(img_file.read()).decode('utf-8')
 
-# 辅助函数：将base64转换为图像
-def base64_to_image(base64_string, output_path):
+def base64_to_image(base64_string: str, output_path: str) -> str:
+    """将base64转换为图像"""
     img_data = base64.b64decode(base64_string)
     with open(output_path, "wb") as f:
         f.write(img_data)
     return output_path
 
-# 与ComfyUI通信的函数
+# ComfyUI 相关函数
 async def send_workflow_to_comfyui(session: aiohttp.ClientSession, workflow: dict) -> Optional[str]:
     """发送工作流到ComfyUI并获取prompt_id"""
-    async with session.post(f"{COMFYUI_SERVER}/api/prompt", json=workflow) as response:
+    async with session.post(f"{config.COMFYUI_SERVER}/api/prompt", json=workflow) as response:
         if response.status != 200:
             error_text = await response.text()
             logger.error(f"发送工作流到 ComfyUI 失败: {error_text}")
@@ -101,10 +145,18 @@ async def send_workflow_to_comfyui(session: aiohttp.ClientSession, workflow: dic
         logger.info(f"从 ComfyUI 获取到 prompt_id: {prompt_id}")
         return prompt_id
 
+def calculate_progress(messages: List) -> float:
+    """计算处理进度"""
+    if not messages:
+        return 0
+    total_messages = len(messages)
+    completed_messages = sum(1 for msg in messages if msg[0] in ['execution_cached', 'execution_success'])
+    return completed_messages / total_messages if total_messages > 0 else 0
+
 async def wait_for_comfyui_processing(session: aiohttp.ClientSession, prompt_id: str, session_id: str) -> bool:
     """等待ComfyUI处理完成并发送进度更新"""
     while True:
-        async with session.get(f"{COMFYUI_SERVER}/api/history") as history_response:
+        async with session.get(f"{config.COMFYUI_SERVER}/api/history") as history_response:
             history_data = await history_response.json()
             queue_data = history_data.get(prompt_id, {})
             status = queue_data.get('status', {})
@@ -118,32 +170,47 @@ async def wait_for_comfyui_processing(session: aiohttp.ClientSession, prompt_id:
                 return False
             
             # 发送进度更新
-            if session_id in active_sessions and active_sessions[session_id].websocket:
-                progress = calculate_progress(status.get('messages', []))
-                if os.environ.get("ENVIRONMENT") == "development":
-                    logger.debug(f"处理进度: {progress * 100:.1f}%")
-                
-                await active_sessions[session_id].websocket.send_json({
-                    "status": "processing",
-                    "progress": progress
-                })
+            if session := state.get_session(session_id):
+                if session.websocket:
+                    progress = calculate_progress(status.get('messages', []))
+                    if config.ENV == Environment.DEVELOPMENT:
+                        logger.debug(f"处理进度: {progress * 100:.1f}%")
+                    
+                    await session.websocket.send_json({
+                        "status": "processing",
+                        "progress": progress
+                    })
             
             await asyncio.sleep(0.5)
 
-def calculate_progress(messages: List) -> float:
-    """计算处理进度"""
-    if not messages:
-        return 0
-    total_messages = len(messages)
-    completed_messages = sum(1 for msg in messages if msg[0] in ['execution_cached', 'execution_success'])
-    return completed_messages / total_messages if total_messages > 0 else 0
+def find_image_output(outputs: Dict) -> Optional[Dict]:
+    """在输出中查找图像节点"""
+    for node_id, node_output in outputs.items():
+        if 'images' in node_output:
+            return node_output['images'][0]
+    return None
+
+def construct_output_path(image_output: Dict) -> Optional[str]:
+    """构建输出文件路径"""
+    image_filename = image_output['filename']
+    image_subfolder = image_output.get('subfolder', '')
+    
+    output_path = os.path.join(config.OUTPUT_DIR, image_filename)
+    if image_subfolder:
+        output_path = os.path.join(config.OUTPUT_DIR, image_subfolder, image_filename)
+    
+    if not os.path.exists(output_path):
+        logger.error(f"输出文件不存在: {output_path}")
+        return None
+    
+    return output_path
 
 async def get_comfyui_result(session: aiohttp.ClientSession, prompt_id: str) -> Optional[str]:
     """获取ComfyUI处理结果"""
-    async with session.get(f"{COMFYUI_SERVER}/api/history/{prompt_id}") as history_response:
+    async with session.get(f"{config.COMFYUI_SERVER}/api/history/{prompt_id}") as history_response:
         history_data = await history_response.json()
         
-        if os.environ.get("ENVIRONMENT") == "development":
+        if config.ENV == Environment.DEVELOPMENT:
             logger.debug(f"获取到历史记录: {json.dumps(history_data, indent=2)}")
         
         prompt_data = history_data.get(prompt_id, {})
@@ -163,68 +230,16 @@ async def get_comfyui_result(session: aiohttp.ClientSession, prompt_id: str) -> 
         
         return construct_output_path(image_output)
 
-def find_image_output(outputs: Dict) -> Optional[Dict]:
-    """在输出中查找图像节点"""
-    for node_id, node_output in outputs.items():
-        if 'images' in node_output:
-            return node_output['images'][0]
-    return None
-
-def construct_output_path(image_output: Dict) -> Optional[str]:
-    """构建输出文件路径"""
-    image_filename = image_output['filename']
-    image_subfolder = image_output.get('subfolder', '')
-    
-    output_path = os.path.join("output", image_filename)
-    if image_subfolder:
-        output_path = os.path.join("output", image_subfolder, image_filename)
-    
-    if not os.path.exists(output_path):
-        logger.error(f"输出文件不存在: {output_path}")
-        return None
-    
-    return output_path
-
-async def send_to_comfyui(sketch_path, style_config, session_id):
-    """发送草图到ComfyUI并获取生成的图像"""
-    try:
-        logger.info(f"开始处理会话 {session_id} 的草图: {sketch_path}")
-        workflow = create_comfyui_workflow(sketch_path, style_config)
-        logger.info(f"已创建工作流，使用风格: {style_config.style_name}")
-        
-        async with aiohttp.ClientSession() as session:
-            # 1. 发送工作流
-            prompt_id = await send_workflow_to_comfyui(session, workflow)
-            if not prompt_id:
-                return None
-            
-            # 2. 等待处理完成
-            success = await wait_for_comfyui_processing(session, prompt_id, session_id)
-            if not success:
-                return None
-            
-            # 3. 获取结果
-            return await get_comfyui_result(session, prompt_id)
-            
-    except Exception as e:
-        logger.error(f"处理过程中出错: {str(e)}")
-        return None
-
-# 创建ComfyUI工作流
-def create_comfyui_workflow(sketch_path, style_config):
+def create_comfyui_workflow(sketch_path: str, style_config: StyleConfig) -> dict:
     """根据风格配置创建ComfyUI工作流"""
-    # 获取对应风格的工作流JSON文件
-    style_file = f"workflow/{style_config.style_name}.json"
+    style_file = Path(config.WORKFLOW_DIR) / f"{style_config.style_name}.json"
     
-    # 如果风格文件不存在，使用默认风格
-    if not os.path.exists(style_file):
-        style_file = "workflow/realistic.json"
+    if not style_file.exists():
+        style_file = Path(config.WORKFLOW_DIR) / "realistic.json"
     
-    # 读取工作流JSON文件
     with open(style_file, 'r') as f:
         workflow = json.load(f)
     
-    # 替换工作流中的图像路径占位符
     for node_id, node in workflow["prompt"].items():
         if node.get("class_type") == "LoadImage" and "inputs" in node and "image" in node["inputs"]:
             if node["inputs"]["image"] == "PLACEHOLDER_PATH":
@@ -232,41 +247,228 @@ def create_comfyui_workflow(sketch_path, style_config):
     
     return workflow
 
-# 后台任务：处理草图
+async def send_to_comfyui(sketch_path: str, style_config: StyleConfig, session_id: str) -> Optional[str]:
+    """发送草图到ComfyUI并获取生成的图像"""
+    try:
+        logger.info(f"开始处理会话 {session_id} 的草图: {sketch_path}")
+        workflow = create_comfyui_workflow(sketch_path, style_config)
+        logger.info(f"已创建工作流，使用风格: {style_config.style_name}")
+        
+        async with aiohttp.ClientSession() as session:
+            prompt_id = await send_workflow_to_comfyui(session, workflow)
+            if not prompt_id:
+                return None
+            
+            success = await wait_for_comfyui_processing(session, prompt_id, session_id)
+            if not success:
+                return None
+            
+            return await get_comfyui_result(session, prompt_id)
+            
+    except Exception as e:
+        logger.error(f"处理过程中出错: {str(e)}")
+        return None
+
+# FastAPI 应用
+app = FastAPI(
+    title="Real-time Drawing API",
+    description="API for real-time drawing with ComfyUI backend",
+    version="1.0.0"
+)
+
+# 中间件
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
+)
+
+# 静态文件
+app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
+
+# API 路由
+@app.get("/")
+async def read_root():
+    """返回前端页面"""
+    return FileResponse("static/index.html")
+
+@app.post("/api/sketch")
+async def upload_sketch(
+    file: UploadFile = File(...),
+    style_name: str = Form("realistic"),
+    session_id: Optional[str] = Form(None)
+):
+    """上传草图并开始处理"""
+    try:
+        logger.info(f"Received sketch upload request: style_name={style_name}, session_id={session_id}")
+        
+        if not file.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="File must be an image")
+        
+        session_id = session_id or str(uuid.uuid4())
+        style_config = StyleConfig(style_name=style_name)
+        
+        session = state.get_session(session_id) or state.create_session(session_id)
+        session.style_config = style_config
+        session.last_update = time.time()
+        
+        sketch_path = os.path.join(config.UPLOAD_DIR, f"{session_id}_{int(time.time())}.png")
+        with open(sketch_path, "wb") as buffer:
+            buffer.write(await file.read())
+        
+        session.sketch_path = sketch_path
+        
+        return JSONResponse({
+            "session_id": session_id,
+            "status": "uploaded",
+            "message": "Sketch uploaded successfully",
+            "websocket_url": f"/api/ws/{session_id}"
+        })
+    except Exception as e:
+        logger.error(f"Error uploading sketch: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/styles")
+async def get_styles():
+    """获取可用的风格列表"""
+    try:
+        style_files = glob.glob(f"{config.WORKFLOW_DIR}/*.json")
+        styles = [Path(f).stem for f in style_files]
+        return JSONResponse({"styles": styles or ["realistic"]})
+    except Exception as e:
+        logger.error(f"Error getting styles: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/result/{session_id}")
+async def get_result(session_id: str):
+    """获取生成的图像结果"""
+    session = state.get_session(session_id)
+    if not session or not session.result_path:
+        raise HTTPException(status_code=404, detail="Result not found")
+    
+    if not os.path.exists(session.result_path):
+        raise HTTPException(status_code=404, detail="Result file not found")
+    
+    return FileResponse(session.result_path)
+
+@app.websocket("/api/ws/{session_id}")
+async def websocket_endpoint(websocket: WebSocket, session_id: str):
+    """WebSocket连接，用于实时更新"""
+    try:
+        await websocket.accept()
+        logger.info(f"WebSocket连接已建立: {session_id}")
+        
+        session = state.get_session(session_id)
+        if not session:
+            await websocket.close(code=1000, reason="Session not found")
+            return
+        
+        session.websocket = websocket
+        session.last_update = time.time()
+        
+        if session.sketch_path and not session.is_processing:
+            asyncio.create_task(process_sketch_task(session_id))
+        
+        while True:
+            try:
+                data = await websocket.receive_text()
+                message = WebSocketMessage.parse_raw(data)
+                
+                if message.type == "sketch_update" and message.sketch_data:
+                    await handle_sketch_update(session, message)
+                elif message.type == "comfyui_image" and message.image_data:
+                    await handle_comfyui_image(session, message)
+                    
+            except json.JSONDecodeError:
+                logger.error(f"无效的JSON消息: {session_id}")
+                await websocket.send_json({
+                    "status": "error",
+                    "message": "无效的JSON消息"
+                })
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket连接已断开: {session_id}")
+    except Exception as e:
+        logger.error(f"WebSocket连接错误: {session_id}, {str(e)}")
+    finally:
+        if session := state.get_session(session_id):
+            session.websocket = None
+
+async def handle_sketch_update(session: Session, message: WebSocketMessage):
+    """处理草图更新"""
+    try:
+        sketch_data = message.sketch_data
+        if sketch_data.startswith("data:image/"):
+            sketch_data = sketch_data.split(",")[1]
+        
+        sketch_path = os.path.join(config.UPLOAD_DIR, f"{session.session_id}_{int(time.time())}.png")
+        base64_to_image(sketch_data, sketch_path)
+        
+        session.sketch_path = sketch_path
+        session.last_update = time.time()
+        
+        if not session.is_processing:
+            asyncio.create_task(process_sketch_task(session.session_id))
+    except Exception as e:
+        logger.error(f"处理草图更新时出错: {str(e)}")
+        if session.websocket:
+            await session.websocket.send_json({
+                "status": "error",
+                "message": f"处理草图更新时出错: {str(e)}"
+            })
+
+async def handle_comfyui_image(session: Session, message: WebSocketMessage):
+    """处理ComfyUI图像"""
+    try:
+        if not message.image_data.startswith("data:image/"):
+            raise ValueError("图片数据格式错误")
+        
+        result_path = os.path.join(config.OUTPUT_DIR, f"{session.session_id}_{int(time.time())}.png")
+        base64_to_image(message.image_data, result_path)
+        
+        session.result_path = result_path
+        
+        if session.websocket:
+            await session.websocket.send_json({
+                "status": "completed",
+                "result_url": f"/api/result/{session.session_id}"
+            })
+    except Exception as e:
+        logger.error(f"处理ComfyUI图像时出错: {str(e)}")
+        if session.websocket:
+            await session.websocket.send_json({
+                "status": "error",
+                "message": f"处理ComfyUI图像时出错: {str(e)}"
+            })
+
 async def process_sketch_task(session_id: str):
     """处理草图并生成图像的后台任务"""
-    if session_id not in active_sessions:
-        logger.error(f"Session {session_id} not found")
-        return
-    
-    session = active_sessions[session_id]
-    if session.is_processing or not session.sketch_path:
+    session = state.get_session(session_id)
+    if not session or session.is_processing or not session.sketch_path:
         return
     
     try:
         session.is_processing = True
         
-        # 通知客户端开始处理
         if session.websocket:
             await session.websocket.send_json({
                 "status": "processing",
                 "message": "Processing sketch..."
             })
         
-        # 直接发送到ComfyUI处理，不进行预处理
         result_path = await send_to_comfyui(session.sketch_path, session.style_config, session_id)
         
         if result_path:
             session.result_path = result_path
-            
-            # 通知客户端处理完成
             if session.websocket:
                 await session.websocket.send_json({
                     "status": "completed",
                     "result_url": f"/api/result/{session_id}"
                 })
         else:
-            # 通知客户端处理失败
             if session.websocket:
                 await session.websocket.send_json({
                     "status": "error",
@@ -282,229 +484,22 @@ async def process_sketch_task(session_id: str):
     finally:
         session.is_processing = False
 
-# API路由
-@app.get("/")
-async def read_root():
-    """返回前端页面"""
-    return FileResponse("static/index.html")
-# 上传草图
-@app.post("/api/sketch")
-async def upload_sketch(
-    file: UploadFile = File(...),
-    style_name: str = Form("realistic"),
-    session_id: Optional[str] = Form(None)
-):
-    """上传草图并开始处理"""
-    try:
-        logger.info(f"Received sketch upload request: style_name={style_name}, session_id={session_id}")
-        
-        # 验证文件类型
-        if not file.content_type.startswith('image/'):
-            logger.error(f"Invalid file type: {file.content_type}")
-            raise HTTPException(status_code=400, detail="File must be an image")
-        
-        # 创建或获取会话ID
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            logger.info(f"Generated new session_id: {session_id}")
-        
-        # 创建风格配置
-        style_config = StyleConfig(
-            style_name=style_name
-        )
-        
-        # 创建或更新会话
-        if session_id not in active_sessions:
-            active_sessions[session_id] = Session(session_id)
-            logger.info(f"Created new session: {session_id}")
-        else:
-            active_sessions[session_id].style_config = style_config
-            active_sessions[session_id].last_update = time.time()
-            logger.info(f"Updated existing session: {session_id}")
-        
-        # 保存上传的草图
-        sketch_path = f"uploads/{session_id}_{int(time.time())}.png"
-        with open(sketch_path, "wb") as buffer:
-            buffer.write(await file.read())
-        logger.info(f"Saved sketch to: {sketch_path}")
-        
-        active_sessions[session_id].sketch_path = sketch_path
-        
-        # 返回会话信息
-        return JSONResponse({
-            "session_id": session_id,
-            "status": "uploaded",
-            "message": "Sketch uploaded successfully",
-            "websocket_url": f"/api/ws/{session_id}"
-        })
-    except Exception as e:
-        logger.error(f"Error uploading sketch: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# 获取生成的图像结果
-@app.get("/api/styles")
-async def get_styles():
-    """获取可用的风格列表"""
-    try:
-        # 获取workflow目录下的所有JSON文件
-        style_files = glob.glob("workflow/*.json")
-        styles = [os.path.basename(f).replace(".json", "") for f in style_files]
-        
-        # 如果没有找到风格文件，返回默认风格
-        if not styles:
-            styles = ["realistic"]
-        
-        return JSONResponse({
-            "styles": styles
-        })
-    except Exception as e:
-        logger.error(f"Error getting styles: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/result/{session_id}")
-async def get_result(session_id: str):
-    """获取生成的图像结果"""
-    if session_id not in active_sessions or not active_sessions[session_id].result_path:
-        raise HTTPException(status_code=404, detail="Result not found")
-    
-    result_path = active_sessions[session_id].result_path
-    if not os.path.exists(result_path):
-        raise HTTPException(status_code=404, detail="Result file not found")
-    
-    return FileResponse(result_path)
-
-@app.websocket("/api/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
-    """WebSocket连接，用于实时更新"""
-    try:
-        await websocket.accept()
-        logger.info(f"WebSocket连接已建立: {session_id}")
-        
-        if session_id not in active_sessions:
-            await websocket.close(code=1000, reason="Session not found")
-            return
-        
-        session = active_sessions[session_id]
-        session.websocket = websocket
-        session.last_update = time.time()
-        
-        # 如果已有草图，开始处理
-        if session.sketch_path and not session.is_processing:
-            logger.info(f"开始处理已有草图: {session.sketch_path}")
-            asyncio.create_task(process_sketch_task(session_id))
-        
-        # 等待消息
-        while True:
-            try:
-                data = await websocket.receive_text()
-                logger.info(f"收到WebSocket消息: {session_id}")
-                message = json.loads(data)
-                
-                # 处理客户端消息
-                if message.get("type") == "sketch_update" and "sketch_data" in message:
-                    logger.info(f"处理草图更新: {session_id}")
-                    # 保存更新的草图
-                    sketch_data = message["sketch_data"]
-                    if sketch_data.startswith("data:image/"):
-                        # 从base64数据中提取图像
-                        sketch_data = sketch_data.split(",")[1]
-                    
-                    sketch_path = f"uploads/{session_id}_{int(time.time())}.png"
-                    base64_to_image(sketch_data, sketch_path)
-                    logger.info(f"草图已保存: {sketch_path}")
-                    
-                    active_sessions[session_id].sketch_path = sketch_path
-                    active_sessions[session_id].last_update = time.time()
-                    
-                    # 开始处理新草图
-                    if not active_sessions[session_id].is_processing:
-                        logger.info(f"开始处理新草图: {session_id}")
-                        asyncio.create_task(process_sketch_task(session_id))
-                elif message.get("type") == "comfyui_image":
-                    # 处理从 ComfyUI 接收到的图像
-                    image_data = message.get("image_data")
-                    if not image_data:
-                        logger.error(f"未接收到图片数据: {session_id}")
-                        await websocket.send_json({
-                            "status": "error",
-                            "message": "未接收到图片数据"
-                        })
-                        continue
-                        
-                    # 验证图片数据格式
-                    if not image_data.startswith("data:image/"):
-                        logger.error(f"图片数据格式错误: {session_id}")
-                        await websocket.send_json({
-                            "status": "error",
-                            "message": "图片数据格式错误"
-                        })
-                        continue
-                    
-                    try:
-                        # 保存图像
-                        result_path = f"output/{session_id}_{int(time.time())}.png"
-                        logger.info(f"准备保存图像到: {result_path}")
-                        base64_to_image(image_data, result_path)
-                        logger.info(f"图片已保存: {result_path}")
-                        
-                        # 更新会话状态
-                        session.result_path = result_path
-                        
-                        # 通知客户端处理完成
-                        await websocket.send_json({
-                            "status": "completed",
-                            "result_url": f"/api/result/{session_id}"
-                        })
-                        logger.info(f"已通知客户端处理完成: {session_id}")
-                    except Exception as e:
-                        logger.error(f"保存图片时出错: {str(e)}")
-                        await websocket.send_json({
-                            "status": "error",
-                            "message": f"保存图片时出错: {str(e)}"
-                        })
-            except json.JSONDecodeError:
-                logger.error(f"无效的JSON消息: {session_id}")
-                await websocket.send_json({
-                    "status": "error",
-                    "message": "无效的JSON消息"
-                })
-    except WebSocketDisconnect:
-        logger.info(f"WebSocket连接已断开: {session_id}")
-    except Exception as e:
-        logger.error(f"WebSocket连接错误: {session_id}, {str(e)}")
-    finally:
-        if session_id in active_sessions:
-            active_sessions[session_id].websocket = None
-
-# 定期清理过期会话
+# 启动和清理
 @app.on_event("startup")
 async def startup_event():
+    """应用启动时的初始化"""
+    create_required_directories()
     asyncio.create_task(cleanup_sessions())
 
 async def cleanup_sessions():
     """定期清理过期会话"""
     while True:
         try:
-            current_time = time.time()
-            expired_sessions = []
-            
-            for session_id, session in active_sessions.items():
-                # 超过1小时的会话视为过期
-                if current_time - session.last_update > 3600:
-                    expired_sessions.append(session_id)
-            
-            # 删除过期会话
-            for session_id in expired_sessions:
-                if session_id in active_sessions:
-                    del active_sessions[session_id]
-                    logger.info(f"Cleaned up expired session {session_id}")
+            state.cleanup_expired_sessions()
         except Exception as e:
             logger.error(f"Error in cleanup_sessions: {str(e)}")
-        
-        # 每10分钟检查一次
-        await asyncio.sleep(600)
+        await asyncio.sleep(config.CLEANUP_INTERVAL)
 
-# 主函数
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)

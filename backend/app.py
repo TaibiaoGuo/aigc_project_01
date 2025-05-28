@@ -10,10 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
-import numpy as np
-import cv2
-from PIL import Image
-import io
 import base64
 import time
 import logging
@@ -47,9 +43,6 @@ COMFYUI_SERVER = os.environ.get("COMFYUI_SERVER", "http://127.0.0.1:8188")
 # 存储用户会话
 active_sessions = {}
 
-# 存储WebSocket连接
-connected_clients = {}
-
 # 线程池执行器，用于处理图像生成任务
 executor = ThreadPoolExecutor(max_workers=4)  # 根据GPU能力调整
 
@@ -69,10 +62,14 @@ class Session:
         self.websocket = None
         self.needs_reprocess = False
 
-# 创建工作目录
-os.makedirs("uploads", exist_ok=True)
-os.makedirs("output", exist_ok=True)  # 改为 output 目录
-os.makedirs("static", exist_ok=True)
+def create_required_directories():
+    """创建所需的目录"""
+    directories = ["uploads", "output", "static"]
+    for directory in directories:
+        os.makedirs(directory, exist_ok=True)
+
+# 创建必要的目录
+create_required_directories()
 
 # 辅助函数：将图像转换为base64
 def image_to_base64(image_path):
@@ -121,10 +118,6 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                         queue_data = history_data.get(prompt_id, {})
                         status = queue_data.get('status', {})
                         
-                        # 获取状态信息
-                        queue_data = history_data.get(prompt_id, {})
-                        status = queue_data.get('status', {})
-                        
                         # 检查状态
                         if status.get('status_str') == 'success' and status.get('completed'):
                             logger.info(f"ComfyUI 处理完成，prompt_id: {prompt_id}")
@@ -146,7 +139,8 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                             else:
                                 progress = 0
                             
-                            logger.debug(f"处理进度: {progress * 100:.1f}%")
+                            if os.environ.get("ENVIRONMENT") == "development":
+                                logger.debug(f"处理进度: {progress * 100:.1f}%")
                             
                             await active_sessions[session_id].websocket.send_json({
                                 "status": "processing",
@@ -159,7 +153,9 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                 logger.info(f"正在获取处理结果，prompt_id: {prompt_id}")
                 async with session.get(f"{COMFYUI_SERVER}/api/history/{prompt_id}") as history_response:
                     history_data = await history_response.json()
-                    logger.debug(f"获取到历史记录: {json.dumps(history_data, indent=2)}")
+                    
+                    if os.environ.get("ENVIRONMENT") == "development":
+                        logger.debug(f"获取到历史记录: {json.dumps(history_data, indent=2)}")
                     
                     # 从历史记录中提取图像节点的输出
                     prompt_data = history_data.get(prompt_id, {})

@@ -309,6 +309,19 @@
             draw(e);
         }
         
+        // 添加节流函数
+        function throttle(func, limit) {
+            let inThrottle;
+            return function(...args) {
+                if (!inThrottle) {
+                    func.apply(this, args);
+                    inThrottle = true;
+                    setTimeout(() => inThrottle = false, limit);
+                }
+            }
+        }
+        
+        // 修改绘画函数
         function draw(e) {
             if (!isDrawing) return;
             
@@ -324,7 +337,13 @@
             ctx.stroke();
             ctx.beginPath();
             ctx.moveTo(x, y);
+            
+            // 使用节流函数发送更新
+            throttledSendUpdate();
         }
+        
+        // 创建节流版本的发送更新函数
+        const throttledSendUpdate = throttle(sendSketchUpdate, 500); // 500ms 节流
         
         function stopDrawing() {
             if (isDrawing) {

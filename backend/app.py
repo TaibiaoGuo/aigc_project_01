@@ -58,15 +58,16 @@ class StyleConfig(BaseModel):
     style_name: str = "realistic"  # 默认风格
 
 # 会话状态
-class SessionState:
-    def __init__(self, session_id: str, style_config: StyleConfig):
+class Session:
+    def __init__(self, session_id: str):
         self.session_id = session_id
-        self.style_config = style_config
         self.sketch_path = None
         self.result_path = None
+        self.style_config = None
         self.is_processing = False
         self.last_update = time.time()
         self.websocket = None
+        self.needs_reprocess = False
 
 # 创建工作目录
 os.makedirs("uploads", exist_ok=True)
@@ -310,7 +311,7 @@ async def upload_sketch(
         
         # 创建或更新会话
         if session_id not in active_sessions:
-            active_sessions[session_id] = SessionState(session_id, style_config)
+            active_sessions[session_id] = Session(session_id)
             logger.info(f"Created new session: {session_id}")
         else:
             active_sessions[session_id].style_config = style_config

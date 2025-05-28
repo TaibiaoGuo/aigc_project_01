@@ -8,16 +8,18 @@ RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# 复制项目文件
-COPY . /app/
+COPY requirements.txt /app/requirements.txt
 
 # 添加 pip 镜像源
 ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 # 安装Python依赖
 RUN pip install --no-cache-dir -r requirements.txt
 
+# 复制项目文件
+COPY . /app/
+
 # 创建必要的目录
-RUN mkdir -p uploads results static
+RUN mkdir -p input static
 
 # 暴露端口
 EXPOSE 8000

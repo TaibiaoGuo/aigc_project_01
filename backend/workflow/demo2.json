@@ -1,4 +1,5 @@
 {
+    "version": 1,
     "prompt": {
         "1": {
             "class_type": "CheckpointLoaderSimple",
@@ -169,13 +170,14 @@
             }
         },
         "15": {
-            "class_type": "ETN_SendImageWebSocket",
+            "class_type": "SaveImage",
             "inputs": {
                 "images": [
                     "14",
                     0
                 ],
-                "format": "PNG"
+                "filename_prefix": "ComfyUI",
+                "output_dir": "output"
             }
         }
     }

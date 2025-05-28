@@ -70,7 +70,7 @@ class SessionState:
 
 # 创建工作目录
 os.makedirs("uploads", exist_ok=True)
-os.makedirs("results", exist_ok=True)
+os.makedirs("output", exist_ok=True)  # 改为 output 目录
 os.makedirs("static", exist_ok=True)
 
 # 辅助函数：将图像转换为base64
@@ -120,28 +120,31 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                         queue_data = history_data.get(prompt_id, {})
                         status = queue_data.get('status', {})
                         
-                        # 添加状态检查日志
-                        logger.info(f"当前状态: {json.dumps(status, indent=2)}")
+                        # 获取状态信息
+                        queue_data = history_data.get(prompt_id, {})
+                        status = queue_data.get('status', {})
                         
-                        if status.get('status') == 'completed':
+                        # 检查状态
+                        if status.get('status_str') == 'success' and status.get('completed'):
                             logger.info(f"ComfyUI 处理完成，prompt_id: {prompt_id}")
                             break
-                        elif status.get('status') == 'error':
+                        elif status.get('status_str') == 'error':
                             error_msg = status.get('error')
                             logger.error(f"ComfyUI 处理出错: {error_msg}")
                             return None
                         
                         # 发送进度更新
                         if session_id in active_sessions and active_sessions[session_id].websocket:
-                            queue_data = history_data.get(prompt_id, {})
-                            running_prompts = queue_data.get('running_prompts', {})
-                            prompt_data = running_prompts.get(prompt_id, {})
-                            progress = prompt_data.get('progress', 0)
+                            # 计算进度
+                            messages = status.get('messages', [])
+                            if messages:
+                                # 根据消息数量估算进度
+                                total_messages = len(messages)
+                                completed_messages = sum(1 for msg in messages if msg[0] in ['execution_cached', 'execution_success'])
+                                progress = completed_messages / total_messages if total_messages > 0 else 0
+                            else:
+                                progress = 0
                             
-                            # 添加详细的调试日志
-                            logger.debug(f"队列数据: {json.dumps(queue_data, indent=2)}")
-                            logger.debug(f"运行中的提示: {json.dumps(running_prompts, indent=2)}")
-                            logger.debug(f"当前提示数据: {json.dumps(prompt_data, indent=2)}")
                             logger.debug(f"处理进度: {progress * 100:.1f}%")
                             
                             await active_sessions[session_id].websocket.send_json({
@@ -155,47 +158,49 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                 logger.info(f"正在获取处理结果，prompt_id: {prompt_id}")
                 async with session.get(f"{COMFYUI_SERVER}/api/history/{prompt_id}") as history_response:
                     history_data = await history_response.json()
+                    logger.debug(f"获取到历史记录: {json.dumps(history_data, indent=2)}")
                     
                     # 从历史记录中提取图像节点的输出
-                    outputs = history_data.get('outputs', {})
+                    prompt_data = history_data.get(prompt_id, {})
+                    if not prompt_data:
+                        logger.error(f"未找到 prompt_id {prompt_id} 的数据")
+                        return None
+                        
+                    outputs = prompt_data.get('outputs', {})
                     if not outputs:
                         logger.error("历史记录中未找到输出")
                         return None
                     
-                    # 找到图像节点的输出
+                    # 找到 SaveImage 节点的输出
                     image_output = None
                     for node_id, node_output in outputs.items():
                         if 'images' in node_output:
                             image_output = node_output['images'][0]
+                            logger.debug(f"找到图像输出: {image_output['filename']}")
                             break
                     
                     if not image_output:
                         logger.error("未找到图像输出")
                         return None
                     
-                    # 下载图像
+                    # 获取文件名和子文件夹
                     image_filename = image_output['filename']
                     image_subfolder = image_output.get('subfolder', '')
-                    logger.info(f"图像文件名: {image_filename}, 子文件夹: {image_subfolder}")
+                    logger.debug(f"生成图片: {image_filename}, 子文件夹: {image_subfolder}")
                     
                     # 构建完整的输出文件路径
                     output_path = os.path.join("output", image_filename)
                     if image_subfolder:
                         output_path = os.path.join("output", image_subfolder, image_filename)
-                    logger.info(f"完整输出路径: {output_path}")
+                    logger.debug(f"完整输出路径: {output_path}")
                     
                     # 检查文件是否存在
                     if not os.path.exists(output_path):
                         logger.error(f"输出文件不存在: {output_path}")
                         return None
                     
-                    # 复制文件到会话特定的位置
-                    result_path = f"output/{session_id}_{int(time.time())}.png"
-                    import shutil
-                    shutil.copy2(output_path, result_path)
-                    logger.info(f"图像已复制到: {result_path}")
-                    
-                    return result_path
+                    # 直接返回输出文件路径
+                    return output_path
     except Exception as e:
         logger.error(f"处理过程中出错: {str(e)}")
         return None
@@ -358,6 +363,9 @@ async def get_result(session_id: str):
         raise HTTPException(status_code=404, detail="Result not found")
     
     result_path = active_sessions[session_id].result_path
+    if not os.path.exists(result_path):
+        raise HTTPException(status_code=404, detail="Result file not found")
+    
     return FileResponse(result_path)
 
 @app.websocket("/api/ws/{session_id}")
@@ -365,7 +373,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     """WebSocket连接，用于实时更新"""
     try:
         await websocket.accept()
-        logger.info("connection open")
+        logger.info(f"WebSocket连接已建立: {session_id}")
         
         if session_id not in active_sessions:
             await websocket.close(code=1000, reason="Session not found")
@@ -377,18 +385,19 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         
         # 如果已有草图，开始处理
         if session.sketch_path and not session.is_processing:
+            logger.info(f"开始处理已有草图: {session.sketch_path}")
             asyncio.create_task(process_sketch_task(session_id))
         
         # 等待消息
         while True:
             try:
                 data = await websocket.receive_text()
-                logger.info(f"Received WebSocket message for session {session_id}: {data}")
+                logger.info(f"收到WebSocket消息: {session_id}")
                 message = json.loads(data)
                 
                 # 处理客户端消息
                 if message.get("type") == "sketch_update" and "sketch_data" in message:
-                    logger.info(f"Processing sketch update for session {session_id}")
+                    logger.info(f"处理草图更新: {session_id}")
                     # 保存更新的草图
                     sketch_data = message["sketch_data"]
                     if sketch_data.startswith("data:image/"):
@@ -397,23 +406,41 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     
                     sketch_path = f"uploads/{session_id}_{int(time.time())}.png"
                     base64_to_image(sketch_data, sketch_path)
-                    logger.info(f"Saved updated sketch to: {sketch_path}")
+                    logger.info(f"草图已保存: {sketch_path}")
                     
                     active_sessions[session_id].sketch_path = sketch_path
                     active_sessions[session_id].last_update = time.time()
                     
                     # 开始处理新草图
                     if not active_sessions[session_id].is_processing:
-                        logger.info(f"Starting processing of updated sketch for session {session_id}")
+                        logger.info(f"开始处理新草图: {session_id}")
                         asyncio.create_task(process_sketch_task(session_id))
                 elif message.get("type") == "comfyui_image":
                     # 处理从 ComfyUI 接收到的图像
                     image_data = message.get("image_data")
-                    if image_data:
+                    if not image_data:
+                        logger.error(f"未接收到图片数据: {session_id}")
+                        await websocket.send_json({
+                            "status": "error",
+                            "message": "未接收到图片数据"
+                        })
+                        continue
+                        
+                    # 验证图片数据格式
+                    if not image_data.startswith("data:image/"):
+                        logger.error(f"图片数据格式错误: {session_id}")
+                        await websocket.send_json({
+                            "status": "error",
+                            "message": "图片数据格式错误"
+                        })
+                        continue
+                    
+                    try:
                         # 保存图像
-                        result_path = f"results/{session_id}_{int(time.time())}.png"
+                        result_path = f"output/{session_id}_{int(time.time())}.png"
+                        logger.info(f"准备保存图像到: {result_path}")
                         base64_to_image(image_data, result_path)
-                        logger.info(f"Saved ComfyUI image to: {result_path}")
+                        logger.info(f"图片已保存: {result_path}")
                         
                         # 更新会话状态
                         session.result_path = result_path
@@ -423,16 +450,23 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             "status": "completed",
                             "result_url": f"/api/result/{session_id}"
                         })
+                        logger.info(f"已通知客户端处理完成: {session_id}")
+                    except Exception as e:
+                        logger.error(f"保存图片时出错: {str(e)}")
+                        await websocket.send_json({
+                            "status": "error",
+                            "message": f"保存图片时出错: {str(e)}"
+                        })
             except json.JSONDecodeError:
-                logger.error(f"Invalid JSON message received for session {session_id}")
+                logger.error(f"无效的JSON消息: {session_id}")
                 await websocket.send_json({
                     "status": "error",
-                    "message": "Invalid JSON message"
+                    "message": "无效的JSON消息"
                 })
     except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for session {session_id}")
+        logger.info(f"WebSocket连接已断开: {session_id}")
     except Exception as e:
-        logger.error(f"Error in WebSocket connection for session {session_id}: {str(e)}")
+        logger.error(f"WebSocket连接错误: {session_id}, {str(e)}")
     finally:
         if session_id in active_sessions:
             active_sessions[session_id].websocket = None

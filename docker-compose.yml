@@ -23,8 +23,7 @@ services:
     environment:
       - COMFYUI_SERVER=http://host.docker.internal:8188
     volumes:
-      - ./backend/uploads:/app/uploads
-      - ./backend/results:/app/results
-      - ./backend/static:/app/static
+      - ../ComfyUI/input/uploads:/app/uploads
+      - ../ComfyUI/output:/app/output
     extra_hosts:
       - "host.docker.internal:host-gateway"

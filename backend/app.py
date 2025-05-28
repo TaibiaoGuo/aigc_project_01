@@ -34,6 +34,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
 )
 
 # 挂载静态文件目录
@@ -108,22 +110,15 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                 
                 # 2. 等待处理完成
                 while True:
-                    async with session.get(f"{COMFYUI_SERVER}/api/queue") as queue_response:
-                        queue_data = await queue_response.json()
+                    async with session.get(f"{COMFYUI_SERVER}/api/history") as history_response:
+                        history_data = await history_response.json()
+                        queue_data = history_data.get(prompt_id, {})
                         
-                        # 检查是否有错误
-                        if 'queue_running' in queue_data and not queue_data['queue_running']:
-                            if session_id in active_sessions and active_sessions[session_id].websocket:
-                                await active_sessions[session_id].websocket.send_json({
-                                    "status": "error",
-                                    "message": "ComfyUI queue is not running"
-                                })
-                            return None
-                        
-                        # 检查是否完成
-                        if prompt_id not in queue_data.get('running_prompts', []) and \
-                           prompt_id not in queue_data.get('pending_prompts', []):
+                        if queue_data.get('status', {}).get('status') == 'completed':
                             break
+                        elif queue_data.get('status', {}).get('status') == 'error':
+                            logger.error(f"Error in ComfyUI processing: {queue_data.get('status', {}).get('error')}")
+                            return None
                         
                         # 发送进度更新
                         if session_id in active_sessions and active_sessions[session_id].websocket:
@@ -142,6 +137,15 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                     # 从历史记录中提取图像节点的输出
                     outputs = history_data.get('outputs', {})
                     if not outputs:
+                        # 检查是否有 WebSocket 输出
+                        for node_id, node in workflow["prompt"].items():
+                            if node.get("class_type") == "ETN_SendImageWebSocket":
+                                # 如果使用 WebSocket 节点，直接返回成功
+                                result_path = f"results/{session_id}_{int(time.time())}.png"
+                                # 创建一个空文件作为占位符
+                                with open(result_path, 'wb') as f:
+                                    f.write(b'')
+                                return result_path
                         logger.error("No outputs found in history")
                         return None
                     
@@ -262,13 +266,17 @@ async def upload_sketch(
 ):
     """上传草图并开始处理"""
     try:
+        logger.info(f"Received sketch upload request: style_name={style_name}, session_id={session_id}")
+        
         # 验证文件类型
         if not file.content_type.startswith('image/'):
+            logger.error(f"Invalid file type: {file.content_type}")
             raise HTTPException(status_code=400, detail="File must be an image")
         
         # 创建或获取会话ID
         if not session_id:
             session_id = str(uuid.uuid4())
+            logger.info(f"Generated new session_id: {session_id}")
         
         # 创建风格配置
         style_config = StyleConfig(
@@ -278,14 +286,17 @@ async def upload_sketch(
         # 创建或更新会话
         if session_id not in active_sessions:
             active_sessions[session_id] = SessionState(session_id, style_config)
+            logger.info(f"Created new session: {session_id}")
         else:
             active_sessions[session_id].style_config = style_config
             active_sessions[session_id].last_update = time.time()
+            logger.info(f"Updated existing session: {session_id}")
         
         # 保存上传的草图
         sketch_path = f"uploads/{session_id}_{int(time.time())}.png"
         with open(sketch_path, "wb") as buffer:
             buffer.write(await file.read())
+        logger.info(f"Saved sketch to: {sketch_path}")
         
         active_sessions[session_id].sketch_path = sketch_path
         
@@ -332,34 +343,32 @@ async def get_result(session_id: str):
 @app.websocket("/api/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     """WebSocket连接，用于实时更新"""
-    await websocket.accept()
-    
     try:
-        # 检查会话是否存在
+        await websocket.accept()
+        logger.info("connection open")
+        
         if session_id not in active_sessions:
-            await websocket.send_json({
-                "status": "error",
-                "message": "Session not found"
-            })
-            await websocket.close()
+            await websocket.close(code=1000, reason="Session not found")
             return
         
-        # 更新会话的WebSocket连接
-        active_sessions[session_id].websocket = websocket
-        connected_clients[session_id] = websocket
+        session = active_sessions[session_id]
+        session.websocket = websocket
+        session.last_update = time.time()
         
         # 如果已有草图，开始处理
-        if active_sessions[session_id].sketch_path and not active_sessions[session_id].is_processing:
+        if session.sketch_path and not session.is_processing:
             asyncio.create_task(process_sketch_task(session_id))
         
         # 等待消息
         while True:
-            data = await websocket.receive_text()
             try:
+                data = await websocket.receive_text()
+                logger.info(f"Received WebSocket message for session {session_id}: {data}")
                 message = json.loads(data)
                 
                 # 处理客户端消息
                 if message.get("type") == "sketch_update" and "sketch_data" in message:
+                    logger.info(f"Processing sketch update for session {session_id}")
                     # 保存更新的草图
                     sketch_data = message["sketch_data"]
                     if sketch_data.startswith("data:image/"):
@@ -368,24 +377,43 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     
                     sketch_path = f"uploads/{session_id}_{int(time.time())}.png"
                     base64_to_image(sketch_data, sketch_path)
+                    logger.info(f"Saved updated sketch to: {sketch_path}")
                     
                     active_sessions[session_id].sketch_path = sketch_path
                     active_sessions[session_id].last_update = time.time()
                     
                     # 开始处理新草图
                     if not active_sessions[session_id].is_processing:
+                        logger.info(f"Starting processing of updated sketch for session {session_id}")
                         asyncio.create_task(process_sketch_task(session_id))
+                elif message.get("type") == "comfyui_image":
+                    # 处理从 ComfyUI 接收到的图像
+                    image_data = message.get("image_data")
+                    if image_data:
+                        # 保存图像
+                        result_path = f"results/{session_id}_{int(time.time())}.png"
+                        base64_to_image(image_data, result_path)
+                        logger.info(f"Saved ComfyUI image to: {result_path}")
+                        
+                        # 更新会话状态
+                        session.result_path = result_path
+                        
+                        # 通知客户端处理完成
+                        await websocket.send_json({
+                            "status": "completed",
+                            "result_url": f"/api/result/{session_id}"
+                        })
             except json.JSONDecodeError:
+                logger.error(f"Invalid JSON message received for session {session_id}")
                 await websocket.send_json({
                     "status": "error",
                     "message": "Invalid JSON message"
                 })
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for session {session_id}")
+    except Exception as e:
+        logger.error(f"Error in WebSocket connection for session {session_id}: {str(e)}")
     finally:
-        # 清理连接
-        if session_id in connected_clients:
-            del connected_clients[session_id]
         if session_id in active_sessions:
             active_sessions[session_id].websocket = None
 

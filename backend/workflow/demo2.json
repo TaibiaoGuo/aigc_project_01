@@ -1,0 +1,182 @@
+{
+    "prompt": {
+        "1": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {
+                "ckpt_name": "RealVisXL_V5.0_fp16.safetensors"
+            }
+        },
+        "2": {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "model": [
+                    "1",
+                    0
+                ],
+                "clip": [
+                    "1",
+                    1
+                ],
+                "lora_name": "20250520-1747734387022-000013.safetensors",
+                "strength_model": 0.8,
+                "strength_clip": 0.8
+            }
+        },
+        "3": {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "model": [
+                    "2",
+                    0
+                ],
+                "clip": [
+                    "2",
+                    1
+                ],
+                "lora_name": "Hyper-SDXL-8steps-CFG-lora.safetensors",
+                "strength_model": 1.0,
+                "strength_clip": 1.0
+            }
+        },
+        "4": {
+            "class_type": "LoadImage",
+            "inputs": {
+                "image": "PLACEHOLDER_PATH",
+                "upload": "image"
+            }
+        },
+        "5": {
+            "class_type": "VAEEncode",
+            "inputs": {
+                "vae": [
+                    "1",
+                    2
+                ],
+                "pixels": [
+                    "4",
+                    0
+                ]
+            }
+        },
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {
+                "clip": [
+                    "3",
+                    1
+                ],
+                "text": "XIANGJIANG LABORATORY ， This is a vivid freehand ink painting，a scene of a classical garden is presented ， using traditional Chinese painting techniques. Its characteristics are delicate and expressive brushstrokes and bright color layers., best quality, highres"
+            }
+        },
+        "7": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {
+                "clip": [
+                    "3",
+                    1
+                ],
+                "text": "bad quality, low resolution, blurry"
+            }
+        },
+        "8": {
+            "class_type": "CFGGuider",
+            "inputs": {
+                "model": [
+                    "3",
+                    0
+                ],
+                "positive": [
+                    "6",
+                    0
+                ],
+                "negative": [
+                    "7",
+                    0
+                ],
+                "cfg": 1.8
+            }
+        },
+        "9": {
+            "class_type": "BasicScheduler",
+            "inputs": {
+                "model": [
+                    "3",
+                    0
+                ],
+                "scheduler": "sgm_uniform",
+                "steps": 6,
+                "denoise": 1.0
+            }
+        },
+        "10": {
+            "class_type": "SplitSigmas",
+            "inputs": {
+                "sigmas": [
+                    "9",
+                    0
+                ],
+                "step": 2
+            }
+        },
+        "11": {
+            "class_type": "RandomNoise",
+            "inputs": {
+                "noise_seed": 1558610404
+            }
+        },
+        "12": {
+            "class_type": "KSamplerSelect",
+            "inputs": {
+                "sampler_name": "euler"
+            }
+        },
+        "13": {
+            "class_type": "SamplerCustomAdvanced",
+            "inputs": {
+                "noise": [
+                    "11",
+                    0
+                ],
+                "guider": [
+                    "8",
+                    0
+                ],
+                "sampler": [
+                    "12",
+                    0
+                ],
+                "sigmas": [
+                    "10",
+                    1
+                ],
+                "latent_image": [
+                    "5",
+                    0
+                ]
+            }
+        },
+        "14": {
+            "class_type": "VAEDecode",
+            "inputs": {
+                "vae": [
+                    "1",
+                    2
+                ],
+                "samples": [
+                    "13",
+                    1
+                ]
+            }
+        },
+        "15": {
+            "class_type": "ETN_SendImageWebSocket",
+            "inputs": {
+                "images": [
+                    "14",
+                    0
+                ],
+                "format": "PNG"
+            }
+        }
+    }
+} 

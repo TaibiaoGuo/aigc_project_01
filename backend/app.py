@@ -89,40 +89,61 @@ def base64_to_image(base64_string, output_path):
 async def send_to_comfyui(sketch_path, style_config, session_id):
     """发送草图到ComfyUI并获取生成的图像"""
     try:
+        logger.info(f"开始处理会话 {session_id} 的草图: {sketch_path}")
         # 构建ComfyUI工作流
         workflow = create_comfyui_workflow(sketch_path, style_config)
+        logger.info(f"已创建工作流，使用风格: {style_config.style_name}")
         
         # 发送请求到ComfyUI
         async with aiohttp.ClientSession() as session:
             # 1. 发送工作流
+            logger.info(f"正在发送工作流到 ComfyUI: {COMFYUI_SERVER}/api/prompt")
             async with session.post(f"{COMFYUI_SERVER}/api/prompt", json=workflow) as response:
                 if response.status != 200:
                     error_text = await response.text()
-                    logger.error(f"Error sending workflow to ComfyUI: {error_text}")
+                    logger.error(f"发送工作流到 ComfyUI 失败: {error_text}")
                     return None
                 
                 prompt_response = await response.json()
                 prompt_id = prompt_response.get('prompt_id')
+                logger.info(f"从 ComfyUI 获取到 prompt_id: {prompt_id}")
                 
                 if not prompt_id:
-                    logger.error("No prompt_id received from ComfyUI")
+                    logger.error("未收到 prompt_id")
                     return None
                 
                 # 2. 等待处理完成
+                logger.info(f"开始等待 ComfyUI 处理完成，prompt_id: {prompt_id}")
                 while True:
                     async with session.get(f"{COMFYUI_SERVER}/api/history") as history_response:
                         history_data = await history_response.json()
                         queue_data = history_data.get(prompt_id, {})
+                        status = queue_data.get('status', {})
                         
-                        if queue_data.get('status', {}).get('status') == 'completed':
+                        # 添加状态检查日志
+                        logger.info(f"当前状态: {json.dumps(status, indent=2)}")
+                        
+                        if status.get('status') == 'completed':
+                            logger.info(f"ComfyUI 处理完成，prompt_id: {prompt_id}")
                             break
-                        elif queue_data.get('status', {}).get('status') == 'error':
-                            logger.error(f"Error in ComfyUI processing: {queue_data.get('status', {}).get('error')}")
+                        elif status.get('status') == 'error':
+                            error_msg = status.get('error')
+                            logger.error(f"ComfyUI 处理出错: {error_msg}")
                             return None
                         
                         # 发送进度更新
                         if session_id in active_sessions and active_sessions[session_id].websocket:
-                            progress = queue_data.get('running_prompts', {}).get(prompt_id, {}).get('progress', 0)
+                            queue_data = history_data.get(prompt_id, {})
+                            running_prompts = queue_data.get('running_prompts', {})
+                            prompt_data = running_prompts.get(prompt_id, {})
+                            progress = prompt_data.get('progress', 0)
+                            
+                            # 添加详细的调试日志
+                            logger.debug(f"队列数据: {json.dumps(queue_data, indent=2)}")
+                            logger.debug(f"运行中的提示: {json.dumps(running_prompts, indent=2)}")
+                            logger.debug(f"当前提示数据: {json.dumps(prompt_data, indent=2)}")
+                            logger.debug(f"处理进度: {progress * 100:.1f}%")
+                            
                             await active_sessions[session_id].websocket.send_json({
                                 "status": "processing",
                                 "progress": progress
@@ -131,12 +152,14 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                         await asyncio.sleep(0.5)
                 
                 # 3. 获取结果
+                logger.info(f"正在获取处理结果，prompt_id: {prompt_id}")
                 async with session.get(f"{COMFYUI_SERVER}/api/history/{prompt_id}") as history_response:
                     history_data = await history_response.json()
                     
                     # 从历史记录中提取图像节点的输出
                     outputs = history_data.get('outputs', {})
                     if not outputs:
+<<<<<<< HEAD
                         # 检查是否有 WebSocket 输出
                         for node_id, node in workflow["prompt"].items():
                             if node.get("class_type") == "ETN_SendImageWebSocket":
@@ -147,6 +170,9 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                                     f.write(b'')
                                 return result_path
                         logger.error("No outputs found in history")
+=======
+                        logger.error("历史记录中未找到输出")
+>>>>>>> aea2954... feature:增强日志记录功能，添加详细的调试信息和错误处理提示，以便更好地跟踪 ComfyUI 处理过程中的状态和输出。
                         return None
                     
                     # 找到图像节点的输出
@@ -157,12 +183,13 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                             break
                     
                     if not image_output:
-                        logger.error("No image output found")
+                        logger.error("未找到图像输出")
                         return None
                     
                     # 下载图像
                     image_filename = image_output['filename']
                     image_subfolder = image_output.get('subfolder', '')
+<<<<<<< HEAD
                     image_url = f"{COMFYUI_SERVER}/view?filename={image_filename}&subfolder={image_subfolder}"
                     
                     async with session.get(image_url) as img_response:
@@ -176,8 +203,30 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                             f.write(await img_response.read())
                         
                         return result_path
+=======
+                    logger.info(f"图像文件名: {image_filename}, 子文件夹: {image_subfolder}")
+                    
+                    # 构建完整的输出文件路径
+                    output_path = os.path.join("output", image_filename)
+                    if image_subfolder:
+                        output_path = os.path.join("output", image_subfolder, image_filename)
+                    logger.info(f"完整输出路径: {output_path}")
+                    
+                    # 检查文件是否存在
+                    if not os.path.exists(output_path):
+                        logger.error(f"输出文件不存在: {output_path}")
+                        return None
+                    
+                    # 复制文件到会话特定的位置
+                    result_path = f"output/{session_id}_{int(time.time())}.png"
+                    import shutil
+                    shutil.copy2(output_path, result_path)
+                    logger.info(f"图像已复制到: {result_path}")
+                    
+                    return result_path
+>>>>>>> aea2954... feature:增强日志记录功能，添加详细的调试信息和错误处理提示，以便更好地跟踪 ComfyUI 处理过程中的状态和输出。
     except Exception as e:
-        logger.error(f"Error in send_to_comfyui: {str(e)}")
+        logger.error(f"处理过程中出错: {str(e)}")
         return None
 
 # 创建ComfyUI工作流

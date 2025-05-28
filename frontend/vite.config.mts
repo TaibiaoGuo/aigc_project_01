@@ -161,6 +161,7 @@ export default defineConfig(({ command }) => {
             // 修改为后端FastAPI服务器
             '/api': {
                 target: 'http://127.0.0.1:8000',
+                // target: 'http://120.79.22.43:30083/',
                 changeOrigin: true,
                 // 不需要重写路径，因为后端API已经包含/api前缀
                 // rewrite: (path) => path.replace(/^/api/, ''),

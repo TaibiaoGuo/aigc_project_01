@@ -159,20 +159,7 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                     # 从历史记录中提取图像节点的输出
                     outputs = history_data.get('outputs', {})
                     if not outputs:
-<<<<<<< HEAD
-                        # 检查是否有 WebSocket 输出
-                        for node_id, node in workflow["prompt"].items():
-                            if node.get("class_type") == "ETN_SendImageWebSocket":
-                                # 如果使用 WebSocket 节点，直接返回成功
-                                result_path = f"results/{session_id}_{int(time.time())}.png"
-                                # 创建一个空文件作为占位符
-                                with open(result_path, 'wb') as f:
-                                    f.write(b'')
-                                return result_path
-                        logger.error("No outputs found in history")
-=======
                         logger.error("历史记录中未找到输出")
->>>>>>> aea2954... feature:增强日志记录功能，添加详细的调试信息和错误处理提示，以便更好地跟踪 ComfyUI 处理过程中的状态和输出。
                         return None
                     
                     # 找到图像节点的输出
@@ -189,21 +176,6 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                     # 下载图像
                     image_filename = image_output['filename']
                     image_subfolder = image_output.get('subfolder', '')
-<<<<<<< HEAD
-                    image_url = f"{COMFYUI_SERVER}/view?filename={image_filename}&subfolder={image_subfolder}"
-                    
-                    async with session.get(image_url) as img_response:
-                        if img_response.status != 200:
-                            logger.error(f"Error downloading image: {await img_response.text()}")
-                            return None
-                        
-                        # 保存图像
-                        result_path = f"results/{session_id}_{int(time.time())}.png"
-                        with open(result_path, 'wb') as f:
-                            f.write(await img_response.read())
-                        
-                        return result_path
-=======
                     logger.info(f"图像文件名: {image_filename}, 子文件夹: {image_subfolder}")
                     
                     # 构建完整的输出文件路径
@@ -224,7 +196,6 @@ async def send_to_comfyui(sketch_path, style_config, session_id):
                     logger.info(f"图像已复制到: {result_path}")
                     
                     return result_path
->>>>>>> aea2954... feature:增强日志记录功能，添加详细的调试信息和错误处理提示，以便更好地跟踪 ComfyUI 处理过程中的状态和输出。
     except Exception as e:
         logger.error(f"处理过程中出错: {str(e)}")
         return None

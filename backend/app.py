@@ -4,7 +4,7 @@ import uuid
 import asyncio
 import aiohttp
 import websockets
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +18,8 @@ import glob
 from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
+import psutil
+import platform
 
 # 配置类
 class Environment(str, Enum):
@@ -29,8 +31,9 @@ class Config:
     ENV: Environment = Environment(os.getenv("ENVIRONMENT", "development"))
     COMFYUI_SERVER: str = os.getenv("COMFYUI_SERVER", "http://127.0.0.1:8188")
     MAX_WORKERS: int = int(os.getenv("MAX_WORKERS", "4"))
-    SESSION_TIMEOUT: int = int(os.getenv("SESSION_TIMEOUT", "3600"))  # 1小时
-    CLEANUP_INTERVAL: int = int(os.getenv("CLEANUP_INTERVAL", "600"))  # 10分钟
+    SESSION_TIMEOUT: int = int(os.getenv("SESSION_TIMEOUT", "1800"))  # 30分钟
+    CLEANUP_INTERVAL: int = int(os.getenv("CLEANUP_INTERVAL", "300"))  # 5分钟
+    MAX_ACTIVE_SESSIONS: int = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))  # 最大活动会话数
     UPLOAD_DIR: str = "uploads"
     OUTPUT_DIR: str = "output"
     STATIC_DIR: str = "static"
@@ -73,6 +76,8 @@ class Session:
     last_update: float = Field(default_factory=time.time)
     websocket: Optional[WebSocket] = None
     needs_reprocess: bool = False
+    last_heartbeat: float = Field(default_factory=time.time)
+    is_alive: bool = True
 
 # 应用状态
 class AppState:
@@ -80,12 +85,17 @@ class AppState:
     def __init__(self):
         self.active_sessions: Dict[str, Session] = {}
         self.executor = ThreadPoolExecutor(max_workers=config.MAX_WORKERS)
+        self._lock = asyncio.Lock()
 
-    def create_session(self, session_id: str) -> Session:
-        """创建新会话"""
-        session = Session(session_id=session_id)
-        self.active_sessions[session_id] = session
-        return session
+    async def create_session(self, session_id: str) -> Optional[Session]:
+        """创建新会话，带并发控制"""
+        async with self._lock:
+            if len(self.active_sessions) >= config.MAX_ACTIVE_SESSIONS:
+                logger.warning(f"达到最大会话数限制: {config.MAX_ACTIVE_SESSIONS}")
+                return None
+            session = Session(session_id=session_id)
+            self.active_sessions[session_id] = session
+            return session
 
     def get_session(self, session_id: str) -> Optional[Session]:
         """获取会话"""
@@ -96,16 +106,39 @@ class AppState:
         if session_id in self.active_sessions:
             del self.active_sessions[session_id]
 
-    def cleanup_expired_sessions(self):
-        """清理过期会话"""
+    async def cleanup_expired_sessions(self):
+        """清理过期会话，带资源释放"""
         current_time = time.time()
         expired_sessions = [
             session_id for session_id, session in self.active_sessions.items()
             if current_time - session.last_update > config.SESSION_TIMEOUT
         ]
+        
         for session_id in expired_sessions:
-            self.remove_session(session_id)
-            logger.info(f"Cleaned up expired session {session_id}")
+            session = self.active_sessions.get(session_id)
+            if session:
+                # 清理会话资源
+                if session.websocket:
+                    try:
+                        await session.websocket.close()
+                    except Exception as e:
+                        logger.error(f"关闭WebSocket连接失败: {session_id}, {str(e)}")
+                
+                # 清理临时文件
+                if session.sketch_path and os.path.exists(session.sketch_path):
+                    try:
+                        os.remove(session.sketch_path)
+                    except Exception as e:
+                        logger.error(f"删除草图文件失败: {session.sketch_path}, {str(e)}")
+                
+                if session.result_path and os.path.exists(session.result_path):
+                    try:
+                        os.remove(session.result_path)
+                    except Exception as e:
+                        logger.error(f"删除结果文件失败: {session.result_path}, {str(e)}")
+                
+                self.remove_session(session_id)
+                logger.info(f"已清理过期会话: {session_id}")
 
 state = AppState()
 
@@ -369,6 +402,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         
         session.websocket = websocket
         session.last_update = time.time()
+        session.last_heartbeat = time.time()
+        session.is_alive = True
+        
+        # 启动心跳检测任务
+        heartbeat_task = asyncio.create_task(heartbeat_check(session_id))
         
         if session.sketch_path and not session.is_processing:
             asyncio.create_task(process_sketch_task(session_id))
@@ -378,7 +416,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 data = await websocket.receive_text()
                 message = WebSocketMessage.parse_raw(data)
                 
-                if message.type == "sketch_update" and message.sketch_data:
+                if message.type == "heartbeat":
+                    session.last_heartbeat = time.time()
+                    await websocket.send_json({"type": "heartbeat_ack"})
+                elif message.type == "sketch_update" and message.sketch_data:
                     await handle_sketch_update(session, message)
                 elif message.type == "comfyui_image" and message.image_data:
                     await handle_comfyui_image(session, message)
@@ -396,6 +437,31 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     finally:
         if session := state.get_session(session_id):
             session.websocket = None
+            session.is_alive = False
+            # 取消心跳检测任务
+            if 'heartbeat_task' in locals():
+                heartbeat_task.cancel()
+
+async def heartbeat_check(session_id: str):
+    """WebSocket心跳检测"""
+    while True:
+        try:
+            session = state.get_session(session_id)
+            if not session or not session.is_alive:
+                break
+                
+            current_time = time.time()
+            if current_time - session.last_heartbeat > 30:  # 30秒无心跳则断开
+                logger.warning(f"会话 {session_id} 心跳超时")
+                if session.websocket:
+                    await session.websocket.close(code=1000, reason="Heartbeat timeout")
+                session.is_alive = False
+                break
+                
+            await asyncio.sleep(10)  # 每10秒检查一次
+        except Exception as e:
+            logger.error(f"心跳检测错误: {session_id}, {str(e)}")
+            break
 
 async def handle_sketch_update(session: Session, message: WebSocketMessage):
     """处理草图更新"""
@@ -495,10 +561,82 @@ async def cleanup_sessions():
     """定期清理过期会话"""
     while True:
         try:
-            state.cleanup_expired_sessions()
+            await state.cleanup_expired_sessions()
+            # 检查系统资源使用情况
+            await check_system_resources()
         except Exception as e:
-            logger.error(f"Error in cleanup_sessions: {str(e)}")
+            logger.error(f"清理会话时发生错误: {str(e)}")
         await asyncio.sleep(config.CLEANUP_INTERVAL)
+
+async def check_system_resources():
+    """检查系统资源使用情况"""
+    try:
+        process = psutil.Process()
+        
+        # 检查内存使用
+        memory_percent = process.memory_percent()
+        if memory_percent > 80:
+            logger.warning(f"内存使用率过高: {memory_percent}%")
+            # 强制清理一些会话
+            await state.cleanup_expired_sessions()
+        
+        # 检查CPU使用
+        cpu_percent = process.cpu_percent(interval=1)
+        if cpu_percent > 80:
+            logger.warning(f"CPU使用率过高: {cpu_percent}%")
+    except Exception as e:
+        logger.error(f"检查系统资源时发生错误: {str(e)}")
+
+class SystemStatus(BaseModel):
+    """系统状态模型"""
+    cpu_percent: float
+    memory_percent: float
+    disk_percent: float
+    active_sessions: int
+    max_sessions: int
+    uptime: float
+    platform: str
+    python_version: str
+
+@app.get("/api/health")
+async def health_check():
+    """健康检查端点"""
+    try:
+        process = psutil.Process()
+        system_status = SystemStatus(
+            cpu_percent=process.cpu_percent(),
+            memory_percent=process.memory_percent(),
+            disk_percent=psutil.disk_usage('/').percent,
+            active_sessions=len(state.active_sessions),
+            max_sessions=config.MAX_ACTIVE_SESSIONS,
+            uptime=time.time() - process.create_time(),
+            platform=platform.platform(),
+            python_version=platform.python_version()
+        )
+        
+        # 检查关键指标
+        is_healthy = (
+            system_status.cpu_percent < 90 and
+            system_status.memory_percent < 90 and
+            system_status.disk_percent < 90 and
+            system_status.active_sessions < config.MAX_ACTIVE_SESSIONS
+        )
+        
+        return JSONResponse({
+            "status": "healthy" if is_healthy else "unhealthy",
+            "system_status": system_status.dict(),
+            "timestamp": time.time()
+        })
+    except Exception as e:
+        logger.error(f"健康检查失败: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": f"健康检查失败: {str(e)}",
+                "timestamp": time.time()
+            }
+        )
 
 if __name__ == "__main__":
     import uvicorn
